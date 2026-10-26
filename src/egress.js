@@ -194,7 +194,7 @@ export async function laneProxyEcho({ signal, timeoutMs = 8000 } = {}) {
  * origin-form the loopback relay serves. Call sites keep `redirect: 'error'` in
  * `init`, so a 3xx is a response, never a second hop that would dodge the outlet.
  */
-export async function egressFetch(url, init) {
+export async function egressFetch(url, init, send = fetch) {
   const relay = activeRelay
   const targetUrl = new URL(url instanceof Request ? url.url : String(url))
   // Only the official OC inference lane uses Bun. Kilo/EAC/catalogs and local
@@ -230,8 +230,8 @@ export async function egressFetch(url, init) {
     if (!isPost) {
       if (laneProxy !== null && freeLaneProxy !== null) return laneProxiedFetch(url, init, laneProxy)
       if (laneProxy !== null && relay === null) return laneProxiedFetch(url, init, laneProxy)
-      if (relay !== null) return relayFetch(url, init, relay)
-      return fetch(url, init)
+      if (relay !== null) return relayFetch(url, init, relay, send)
+      return send(url, init)
     }
     const executable = findBunExecutable()
     if (!executable) {
@@ -253,12 +253,14 @@ export async function egressFetch(url, init) {
     }
     return bunFetch(url, init, { executable, proxy })
   }
-  if (relay === null) return fetch(url, init)
-  return relayFetch(url, init, relay)
+  if (relay === null) return send(url, init)
+  // The signed CodeArts lane supplies its own sender so the local relay hop
+  // cannot re-enter a third-party global fetch wrapper and change signed bytes.
+  return relayFetch(url, init, relay, send)
 }
 
 /** Rewrite one request onto the loopback relay (`egressFetch`'s second half). */
-function relayFetch(url, init, relay) {
+function relayFetch(url, init, relay, send = fetch) {
   const request = url instanceof Request ? new Request(url, init) : null
   const target = new URL(request ? request.url : String(url))
   if (target.protocol !== 'http:' && target.protocol !== 'https:') {
@@ -271,7 +273,7 @@ function relayFetch(url, init, relay) {
     ...init, method: request.method, body: request.body, signal: request.signal,
     redirect: request.redirect, ...(request.body ? { duplex: 'half' } : {}),
   } : init
-  return fetch(`http://${RELAY_HOST}:${relay.port}${target.pathname}${target.search}`, { ...outgoing, headers })
+  return send(`http://${RELAY_HOST}:${relay.port}${target.pathname}${target.search}`, { ...outgoing, headers })
 }
 
 /**

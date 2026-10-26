@@ -337,6 +337,9 @@ class MemoryStore implements ChannelPackStore {
  * 派生用例不校验顺序（恢复顺序由 refs 文件决定），但两者对齐后便于逐项核对。
  */
 const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
+  ['CODEARTS', 'codearts'],
+  ['BUDDY', 'buddy'],
+  ['WORKBUDDY', 'workbuddy'],
   ['LOBSTERAI', 'lobsterai'],
   ['QODER', 'qoder'],
   ['QODERCN', 'qodercn'],
