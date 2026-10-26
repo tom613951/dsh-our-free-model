@@ -739,7 +739,8 @@ export class AccountPool {
   async findAccountIdByCredential(provider: string, identity: string): Promise<string> {
     if (identity.length === 0) return ''
 
-    const identifierKey = 'access_token'
+    // CodeArts 用 access_key_id。选错字段会导致匹配恒失败，限流记录无法归属账号。
+    const identifierKey = provider === 'codearts' ? 'access_key_id' : 'access_token'
     for (const entry of this.readAccounts()) {
       if (entry.provider !== provider || !entry.enabled) continue
       const resolved = await this.resolveCredentialByRef(entry.credentialRef)

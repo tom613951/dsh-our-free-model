@@ -51,3 +51,18 @@ export function parseRateLimitError(
     return status === 429 ? fallback() : null
   }
 }
+
+const MODEL_SATURATION_PATTERN = /模型繁忙|请求量饱和|model\s+busy|currently\s+saturated/i
+const MODEL_SATURATION_BUSINESS_CODE = 14003
+
+export function isModelSaturationError(status: number | undefined, body: string): boolean {
+  if (typeof status === 'number' && status < 400) return false
+  if (body.length === 0) return false
+  try {
+    const code = (JSON.parse(body) as Record<string, unknown>).code
+    if (code === MODEL_SATURATION_BUSINESS_CODE || code === String(MODEL_SATURATION_BUSINESS_CODE)) return true
+  } catch {
+    // 非 JSON：交给文案兜底。
+  }
+  return MODEL_SATURATION_PATTERN.test(body)
+}

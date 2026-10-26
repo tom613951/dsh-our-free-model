@@ -32,6 +32,7 @@ import { QoderAdapter } from './qoder-adapter.js'
 import { ClineAdapter } from './cline-adapter.js'
 import { ZcodeAdapter } from './zcode-adapter.js'
 import { TraeAdapter } from './trae-adapter.js'
+import { CodeArtsAdapter } from './llm-adapter.js'
 import { isRateLimited, parseRateLimitError } from './rate-limit.js'
 import { lobsteraiProductById } from './lobsterai-product.js'
 import { qoderProductById } from './qoder-product.js'
@@ -41,6 +42,7 @@ import { GeminiAdapter } from './gemini-adapter.js'
 import { LoomyAdapter } from './loomy-adapter.js'
 import { GEMINI, GEMINI_DEFAULT_PROJECT, GEMINI_SESSION_LANE_SMOKE } from './gemini.js'
 import { LOOMY } from './loomy-product.js'
+import type { CodeArtsCredential } from './types.js'
 import type { LobsteraiCredential } from './lobsterai.js'
 import type { QoderCredential } from './qoder.js'
 import type { ClineCredential } from './cline.js'
@@ -69,6 +71,7 @@ const TRAE_PROVIDER_ID = 'trae'
  * 避免签名与实现漂移（本文件已**四次**因「分派表没跟上新增 provider」出缺陷）。
  */
 type ProbeCredential =
+  | CodeArtsCredential
   | LobsteraiCredential
   | QoderCredential
   | ClineCredential
@@ -327,6 +330,12 @@ async function probeWithAdapter(
       sessionLane: GEMINI_SESSION_LANE_SMOKE,
       project: GEMINI_DEFAULT_PROJECT,
       product: GEMINI,
+    })
+  } else if (entry.provider === 'codearts') {
+    adapter = new CodeArtsAdapter({
+      credentialRef: ref,
+      resolveCredential: async () => credential as CodeArtsCredential,
+      refresh: async () => {},
     })
   } else {
     throw new Error(`Unsupported probe adapter: ${entry.provider}`)
