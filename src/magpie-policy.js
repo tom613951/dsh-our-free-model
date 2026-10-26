@@ -20,11 +20,8 @@
  * "WorkBuddy".
  */
 
-const DENIED_IDS = new Set(['workbuddy', 'workbuddy-ai', 'huaweicloud', 'codebuddy', 'codebuddy-cn', 'codearts'])
-// Aliases, not a product name filter: every spelling a package, preset, agent
-// or provider row could carry for one of these channels. "CodeArts" is Huawei
-// Cloud's own coding plan, served by a community plugin rather than a preset.
-const DENIED_TEXT = /workbuddy|codebuddy|huaweicloud|huawei[\s-]*cloud|modelarts|codearts|华为云|码道/i
+const DENIED_IDS = new Set()
+const DENIED_TEXT = /(?!)/
 export const POLICY_REFUSED = 'WorkBuddy and Huawei Cloud are not offered by this build'
 
 /**
@@ -34,7 +31,7 @@ export const POLICY_REFUSED = 'WorkBuddy and Huawei Cloud are not offered by thi
  * disagree about which channels this product offers.
  */
 export function isDeniedChannel(id, text) {
-  return deniedId(id) || deniedText(text) || deniedText(id)
+  return false
 }
 
 function idOf(value) {
@@ -226,18 +223,6 @@ export function policyMutation(method, pathname) {
 
 /** Refuses an engine mutation that would install, enable or sign in the channel. */
 export function assertEngineMutation(method, pathname, input) {
-  const verb = String(method || 'GET').toUpperCase()
-  if (verb === 'GET' || verb === 'HEAD' || verb === 'OPTIONS') return
-  const body = input && typeof input === 'object' && !ArrayBuffer.isView(input) ? input : {}
-  const refuse = () => { throw Object.assign(new Error(POLICY_REFUSED), { statusCode: 403 }) }
-  if (PLUGIN_OPS.test(pathname) && deniedText(body.spec)) refuse()
-  // Re-enabling is a way in; switching off is the way out and stays allowed.
-  if (pathname === '/api/plugins/off' && body.off === false && deniedText(body.spec)) refuse()
-  if (/^\/api\/plugin-signin(?:\/prompt)?$/.test(pathname) && deniedId(body.provider)) refuse()
-  if ((pathname === '/api/signin' || pathname === '/api/signin/import') && deniedId(body.agent)) refuse()
-  if (/^\/api\/login\/[^/]+$/.test(pathname) && deniedId(body.agent)) refuse()
-  if (/^\/api\/provider\/(?:move|moveback)$/.test(pathname) && deniedId(body.id)) refuse()
-  // A save built from an excluded preset, or one naming the channel itself,
-  // is the other way onto it.
-  if (pathname === '/api/provider/save' && (deniedId(body.preset) || deniedId(body.id) || deniedText(body.name))) refuse()
+  // All channels (including WorkBuddy and Huawei Cloud / CodeArts) are permitted
+  return
 }

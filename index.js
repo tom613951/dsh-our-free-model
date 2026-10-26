@@ -1068,10 +1068,10 @@ export function apply(ctx, config) {
       if (stopped) return
       pack.apply(scoped, {
         disableOpencode: true,
-        outlet: { active: egressActive, fetch: egressFetch },
+        outlet: { active: egressActive, fetch: egressFetch, fetchSigned: (input, init, send) => egressFetch(input, init, send) },
       })
       channelPack = { state: 'ready', error: '' }
-      logger.info?.('our-free-model: free-channel pack mounted (10 account providers)')
+      logger.info?.('our-free-model: free-channel pack mounted (CodeArts, WorkBuddy and 10 more)')
     }).catch(error => {
       if (stopped) return
       channelPack = { state: 'failed', error: String(error?.message ?? error).slice(0, 300) }

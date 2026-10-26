@@ -2,12 +2,17 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
+import { registerCodeArtsLlm, PROVIDER as CODEARTS_PROVIDER } from './llm-adapter.js'
+import { registerBuddyLlm } from './buddy-adapter.js'
 import { registerLobsteraiLlm } from './lobsterai-adapter.js'
 import { registerQoderLlm } from './qoder-adapter.js'
 import { registerTraeLlm } from './trae-adapter.js'
 import { registerClineLlm } from './cline-adapter.js'
 import { registerLoomyLlm, parseLoomyRemoteModels } from './loomy-adapter.js'
 import { registerRaccoonLlm } from './raccoon-adapter.js'
+import { CODEARTS_CREDENTIAL_REF, CodeArtsAuth } from './service.js'
+import type { CodeArtsCredential } from './types.js'
+import { BUDDY_CREDENTIAL_REF, BuddyAuth, createPoolRefresh } from './buddy-auth.js'
 import { LobsteraiAuth } from './lobsterai-auth.js'
 import { QoderAuth } from './qoder-auth.js'
 import { TraeAuth } from './trae-auth.js'
@@ -34,6 +39,10 @@ import {
   reportLedgerAccount,
 } from './token-ledger.js'
 import { createTokenLedgerStore } from './token-ledger-store.js'
+import { CODEBUDDY, WORKBUDDY, type BuddyProduct } from './product.js'
+import { buddyExpiringWindowDays } from './buddy-balance-rank.js'
+import { BuddyBalanceSelector, pickBuddyAccount } from './buddy-balance-selector.js'
+import type { BuddyCredential } from './types.js'
 import { LOBSTERAI } from './lobsterai-product.js'
 import { QODER, QODER_CN } from './qoder-product.js'
 import { TRAE } from './trae-product.js'
@@ -66,6 +75,8 @@ import { deriveProjectId, opencodeUserAgent, opencodeUserAgentForVersion } from 
 import { primeOpencodeCapabilities, refreshOpencodeCapabilities } from './opencode-capability.js'
 import { closeAllProxyDispatchers } from './opencode-proxy.js'
 import { createChannelFetch, type ChannelOutlet } from './channel-fetch.js'
+import { attachDirectFetch, createDirectFetch, type SignedChannelOutlet } from './direct-fetch.js'
+export { directFetch, directLane, createDirectFetch, closeDirectFetch } from './direct-fetch.js'
 export { createChannelFetch, parseWindowsProxy, channelProxyBypassed } from './channel-fetch.js'
 import { execFile } from 'node:child_process'
 
@@ -245,8 +256,11 @@ export function makeReadImageRequest(ctx: Context) {
   }
 }
 
-export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?: ChannelOutlet } = {}): void {
+export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?: SignedChannelOutlet } = {}): void {
   const network = createChannelFetch({ outlet: config.outlet })
+  const signedNetwork = createDirectFetch({ outlet: config.outlet })
+  const detachSignedNetwork = attachDirectFetch(signedNetwork.fetch)
+  ctx.effect(() => () => { detachSignedNetwork(); void signedNetwork.close() })
   ctx.effect(() => () => { void network.close() })
   // 本插件自带 Channel Pack 设置页，关闭 0.1.7 起由 Config schema 反渲染的自动表单
   // （老契约没有 configure()，静默跳过）。
@@ -263,10 +277,11 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // ⚠️ 2026-10-01 起各 provider 已**不再**声明为可配置 provider，故这批 namespace
   // 在模型设置页上已无消费者（详见该函数头的说明）。
   registerProviderSettings(
-    ctx, 'llm-lobsterai',
+    ctx, 'llm-codearts', 'llm-lobsterai',
     'llm-qoder', 'llm-qodercn', 'llm-trae', 'llm-cline', 'llm-loomy', 'llm-raccoon',
     'llm-minimax', 'llm-zcode', 'llm-gemini',
   )
+  const service = new CodeArtsAuth(ctx, { fetcher: signedNetwork.fetch })
   const pool = new AccountPool(ctx)
   const accountForRefresh = async (provider: string, accountId?: string) => {
     if (accountId === undefined) return pool.getAvailableAccount(provider, '')
@@ -334,6 +349,166 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
       'QUOTA_EXCEEDED',
     )
   }
+
+  const resolveBuddyCredentialByRef = async (refName: string): Promise<BuddyCredential | undefined> => {
+    const resolved = await ctx.credentials.resolve(credentialRef(refName))
+    if (!resolved) return undefined
+    try {
+      return JSON.parse(resolved.value) as BuddyCredential
+    } catch {
+      return undefined
+    }
+  }
+
+  const buddyBalanceSelector = new BuddyBalanceSelector({
+    product: CODEBUDDY,
+    resolveCredential: resolveBuddyCredentialByRef,
+  })
+  const workbuddyBalanceSelector = new BuddyBalanceSelector({
+    product: WORKBUDDY,
+    resolveCredential: resolveBuddyCredentialByRef,
+  })
+
+  const pickBuddyCredential = async (options: {
+    product: BuddyProduct
+    selector: BuddyBalanceSelector
+    displayName: string
+    modelId?: string
+    isFreeModel?: boolean
+  }): Promise<{ credential?: BuddyCredential; tried: Set<string> }> => {
+    const tried = new Set<string>()
+    const candidates = pool
+      .listAccountsByProvider(options.product.id)
+      .filter(a => a.enabled)
+      .filter((a) => {
+        const key = options.modelId ?? ''
+        if (key.length === 0) return true
+        if (!a.modelRateLimits) return true
+        const resetAt = a.modelRateLimits[key]
+        return resetAt === undefined || resetAt === 0 || Date.now() >= resetAt
+      })
+      .map(a => ({ id: a.id, credentialRef: a.credentialRef }))
+
+    if (options.isFreeModel === true) {
+      for (const candidate of candidates) {
+        const credential = await resolveBuddyCredentialByRef(candidate.credentialRef)
+        if (credential !== undefined) return { credential, tried }
+        tried.add(candidate.id)
+      }
+    }
+
+    const allowPermanent = !pool.permanentLocked(options.product.id)
+
+    const picked = await pickBuddyAccount(options.selector, candidates, {
+      allowPermanent,
+      resolveCredential: resolveBuddyCredentialByRef,
+    })
+    if (picked.kind === 'account') {
+      return { credential: picked.credential, tried: new Set(picked.tried) }
+    }
+    for (const id of picked.tried) tried.add(id)
+    if (picked.kind === 'locked') {
+      const days = buddyExpiringWindowDays()
+      if (picked.reason?.kind === 'unknown') {
+        throw new Error(
+          `${options.displayName}：无法确认是否有可用账号。已锁定永久积分，而部分账号的余额查询失败`
+          + `（${picked.reason.errors.slice(0, 2).join('；')}）。这些账号可能仍有「${days} 天内到期」`
+          + '的积分 —— 请重试，或在 Channel Pack 对应面板检查凭据是否失效。',
+        )
+      }
+      throw new Error(
+        `${options.displayName}：没有可用账号。已锁定永久积分，而所有账号的「${days} 天内到期」`
+        + '赠送额度均已耗尽。可前往 Channel Pack 面板关闭锁定以继续消耗长期/永久额度。',
+      )
+    }
+
+    return { tried }
+  }
+
+  // ===== 华为云 CodeArts 服务 =====
+  const codearts = registerCodeArtsLlm(ctx, {
+    credentialRef: credentialRef(CODEARTS_CREDENTIAL_REF),
+    resolveCredential: async () => {
+      const available = await pool.getAvailableAccount('codearts', '')
+      return available?.credential as CodeArtsCredential | undefined
+    },
+    refresh: async () => {
+      const available = await pool.getAvailableAccount('codearts', '')
+      if (available) await service.refreshAccountCredential(available.entry.credentialRef, pool, available.entry.id)
+    },
+    fetchRemoteModels: () => service.refreshModels(pool),
+    accountPool: pool,
+  })
+
+  // ===== Buddy (腾讯 CodeBuddy) 服务 =====
+  const buddy = new BuddyAuth(ctx)
+  const buddyAdapter = registerBuddyLlm(ctx, {
+    credentialRef: credentialRef(BUDDY_CREDENTIAL_REF),
+    resolveCredential: async (modelId?: string) => {
+      const picked = await pickBuddyCredential({
+        product: CODEBUDDY,
+        selector: buddyBalanceSelector,
+        displayName: 'CodeBuddy',
+        modelId,
+        isFreeModel: await buddyAdapter.isFreeModel(modelId),
+      })
+      if (picked.credential) return picked.credential
+      const available = await pool.getAvailableAccount(CODEBUDDY.id, modelId ?? '', picked.tried)
+      if (available) {
+        reportLedgerAccount(CODEBUDDY.id, available.entry.id)
+        return available.credential as BuddyCredential
+      }
+      throwIfAllAccountsRateLimited(CODEBUDDY, modelId)
+      const resolved = await ctx.credentials.resolve(credentialRef(BUDDY_CREDENTIAL_REF))
+      if (!resolved) return undefined
+      try {
+        return JSON.parse(resolved.value) as BuddyCredential
+      } catch {
+        return undefined
+      }
+    },
+    refresh: createPoolRefresh(pool, 'buddy', buddy),
+    fetchRemoteModels: () => buddy.fetchModels(pool),
+    readImage: makeReadImage(ctx),
+    readImageRequest: makeReadImageRequest(ctx),
+    accountPool: pool,
+    product: CODEBUDDY,
+  })
+
+  // ===== WorkBuddy (腾讯 WorkBuddy) 服务 =====
+  const workbuddy = new BuddyAuth(ctx, { product: WORKBUDDY })
+  const workbuddyAdapter = registerBuddyLlm(ctx, {
+    credentialRef: credentialRef(WORKBUDDY.defaultCredentialRef),
+    resolveCredential: async (modelId?: string) => {
+      const picked = await pickBuddyCredential({
+        product: WORKBUDDY,
+        selector: workbuddyBalanceSelector,
+        displayName: 'WorkBuddy',
+        modelId,
+        isFreeModel: await workbuddyAdapter.isFreeModel(modelId),
+      })
+      if (picked.credential) return picked.credential
+      const available = await pool.getAvailableAccount(WORKBUDDY.id, modelId ?? '', picked.tried)
+      if (available) {
+        reportLedgerAccount(WORKBUDDY.id, available.entry.id)
+        return available.credential as BuddyCredential
+      }
+      throwIfAllAccountsRateLimited(WORKBUDDY, modelId)
+      const resolved = await ctx.credentials.resolve(credentialRef(WORKBUDDY.defaultCredentialRef))
+      if (!resolved) return undefined
+      try {
+        return JSON.parse(resolved.value) as BuddyCredential
+      } catch {
+        return undefined
+      }
+    },
+    refresh: createPoolRefresh(pool, 'workbuddy', workbuddy),
+    fetchRemoteModels: () => workbuddy.fetchModels(pool),
+    readImage: makeReadImage(ctx),
+    readImageRequest: makeReadImageRequest(ctx),
+    accountPool: pool,
+    product: WORKBUDDY,
+  })
 
   // ===== LobsterAI (有道龙虾) 服务 =====
 
@@ -1384,6 +1559,8 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
    * 「凭据一直刷不动」在日志里完全无痕（issue !IKIRTT 的可观测性条目）。
    */
   const refreshTargets: ReadonlyArray<readonly [string, (pool: AccountPool) => Promise<void>]> = [
+    ['buddy', (p) => buddy.refreshAll(p)],
+    ['workbuddy', (p) => workbuddy.refreshAll(p)],
     ['lobsterai', (p) => lobsterai.refreshAll(p)],
     ['qoder', (p) => qoder.refreshAll(p)],
     ['qodercn', (p) => qoderCn.refreshAll(p)],
@@ -1400,6 +1577,7 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     // 把各账号 ref 下最新的凭据回写一遍，让用户重新登录后无需重启 DSH。
     // ⚠ 只按 `refreshable` 过滤、**不看 `enabled`**（AGENTS.md 既有约定）。
     ['zcode', (p) => zcode.refreshAll(p)],
+    ['codearts', (p) => service.refreshAll(p)],
     // ⚠️ Gemini **可续期**（Google OAuth 的 refresh_token，且会轮换）。
     // ⚠️ 漏了这一行定时器不武装：凭据到期后**不会自动续期**，
     // 用户会看到「每隔一小时就要重新登录」，且日志里一个字都没有。
@@ -1449,6 +1627,9 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     refreshTimer.unref?.()
     ctx.effect(() => () => {
       clearInterval(refreshTimer)
+      service.stop()
+      buddy.stop()
+      workbuddy.stop()
       lobsterai.stop()
       qoder.stop()
       qoderCn.stop()
@@ -1472,6 +1653,9 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
 
   // 保留旧的 stop scheduler（兼容旧命令）
   ctx.effect(() => () => {
+    service.stop()
+    buddy.stop()
+    workbuddy.stop()
     lobsterai.stop()
     qoder.stop()
     qoderCn.stop()
@@ -1645,8 +1829,9 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     }
   }
   const modelAdapters: Record<string, { listAllModels(): readonly { id: string; name: string }[] }> = {
-
-    // 服务实例 `service` 不同名，故这里可以简写）。
+    codearts: pruned(CODEARTS_PROVIDER, codearts),
+    buddy: pruned('buddy', buddyAdapter),
+    workbuddy: pruned('workbuddy', workbuddyAdapter),
     lobsterai: pruned(LOBSTERAI.id, lobsteraiAdapter),
     qoder: pruned(QODER.id, qoderAdapter),
     qodercn: pruned(QODER_CN.id, qoderCnAdapter),
@@ -1667,6 +1852,10 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
 
   registerChannelPackRpc(ctx, pool, lobsterai, qoder, qoderCn, trae, cline, loomy, raccoon, minimax, zcode, gemini, modelAdapters, {
     ...config,
+    buddy,
+    workbuddy,
+    codearts: service,
+    codeartsFetcher: signedNetwork.fetch,
   })
   // 网关是旁路功能：这里传 `pool` 只为读设置页里的开关，其内部任何失败都已
   // 自行降级为日志，绝不会让插件 apply() 失败。

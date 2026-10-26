@@ -4410,6 +4410,9 @@ window.__ModuleLoader__.load({
      * and logo tile; `login` picks the flow the card offers.
      */
     const CHANNEL_PROVIDERS = [
+      { id: 'codearts', name: 'CodeArts', org: '华为云', accent: '#C7000B', note: 'DeepSeek · GLM · openPangu，每日免费额度', login: 'browser' },
+      { id: 'buddy', name: 'WorkBuddy 国内版', org: '腾讯 · copilot.tencent.com', accent: '#0A7AFF', note: 'CodeBuddy 同一端点：DeepSeek · Kimi · GLM 免费线，每日积分', login: 'browser' },
+      { id: 'workbuddy', name: 'WorkBuddy 国际版', org: '腾讯 · workbuddy.ai', accent: '#0B63CE', note: '国际版端点：独立账号与积分体系', login: 'browser' },
       { id: 'lobsterai', name: 'LobsterAI', org: '有道', accent: '#FF6A00', note: '龙虾 · 每日签到积分', login: 'browser' },
       { id: 'qoder', name: 'Qoder', org: '阿里系', accent: '#615CED', note: '每日 100 Credits，加密推理端点', login: 'browser' },
       { id: 'qodercn', name: 'Qoder 中国版', org: '阿里系', accent: '#7A6CF0', note: '中国版端点与模型池', login: 'browser' },
@@ -4424,6 +4427,9 @@ window.__ModuleLoader__.load({
 
     /** 与现有 RPC 的能力对应：余额、每日领取及独立签到状态分别判断。 */
     const CHANNEL_CREDITS = {
+      codearts: { claim: true },
+      buddy: { claim: true, status: true },
+      workbuddy: {},
       lobsterai: { claim: true },
       qoder: { claim: true },
       qodercn: { claim: true },
