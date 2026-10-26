@@ -203,6 +203,8 @@ export function roundCredits(value: number): number {
   return Math.round(value * 100) / 100
 }
 
+export * from './buddy-credits.js'
+
 /**
  * 把单位串归一到**展示口径**，返回 `'token'` 或 `'credit'`。
  *

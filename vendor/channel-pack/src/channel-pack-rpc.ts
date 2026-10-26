@@ -18,6 +18,13 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { isSupportedProvider } from './channel-pack-store.js'
+import { directFetch } from './direct-fetch.js'
+import { CodeArtsAuth } from './service.js'
+import type { CodeArtsCredential } from './types.js'
+import {
+  claimCodeArtsDailyCheckin,
+  fetchCodeArtsAccountInfoDetailed,
+} from './codearts-credits.js'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { AccountPool } from './account-pool.js'
 import { isGatewayEnabled } from './openai-gateway/config.js'
@@ -96,6 +103,12 @@ import {
   type ClaimOutcome,
   type CreditBalance,
 } from './credits.js'
+import { CODEBUDDY, WORKBUDDY, productById, type BuddyProduct } from './product.js'
+import type { BuddyCredential } from './types.js'
+import { fetchCreditBalance, fetchCheckinStatus, claimDailyCheckin } from './buddy-credits.js'
+import { decorateLoginUrl, fetchAuthState, runBuddyLoginFlow } from './buddy-oauth.js'
+import { credentialExpiresAtMs } from './buddy.js'
+import { BuddyAuth } from './buddy-auth.js'
 import {
   captchaDemand,
   putSuppliedParam,
@@ -273,6 +286,30 @@ export function normalizeZcodeLoginProvider(raw: string | undefined): ZcodeLogin
   return ZCODE_LOGIN_PROVIDER
 }
 
+/** 解析 Buddy 凭据 JSON；解析失败返回 undefined。 */
+function parseBuddyCredential(raw: string): BuddyCredential | undefined {
+  try {
+    const parsed = JSON.parse(raw) as BuddyCredential
+    return typeof parsed === 'object' && parsed !== null && typeof parsed.access_token === 'string'
+      ? parsed
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 解析 CodeArts 凭据 JSON；解析失败返回 undefined。 */
+function parseCodeArtsCredential(raw: string): CodeArtsCredential | undefined {
+  try {
+    const parsed = JSON.parse(raw) as CodeArtsCredential
+    return typeof parsed === 'object' && parsed !== null && typeof parsed.access_key_id === 'string'
+      ? parsed
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** 解析 LobsterAI 凭据 JSON；解析失败返回 undefined。 */
 function parseLobsteraiCredential(raw: string): LobsteraiCredential | undefined {
   try {
@@ -377,6 +414,8 @@ export function buildRaccoonNickname(
  */
 export const PERMANENT_LOCK_PROVIDERS: ReadonlySet<string> = new Set([
   LOOMY.id,
+  CODEBUDDY.id,
+  WORKBUDDY.id,
 ])
 
 /**
@@ -728,7 +767,11 @@ function providerIdsOf(
 /** RPC 的可选配置；追加字段以兼容现有 provider / modelAdapters 的位置参数调用。 */
 export interface ChannelPackRpcConfig {
   disableOpencode?: boolean
-
+  buddy?: BuddyAuth
+  workbuddy?: BuddyAuth
+  codearts?: CodeArtsAuth
+  /** 本插件实例的 CodeArts 签名传输；旧调用省略时沿用 directFetch。 */
+  codeartsFetcher?: typeof fetch
 }
 
 /**
@@ -1259,6 +1302,15 @@ function registerChannelPackEndpoints(
    * 反过来（switch 先匹配）又会被别的 provider 的 case 误吞。
    */
   async function handleMethod(method: string, payload: unknown, signal?: AbortSignal): Promise<unknown> {
+    const codeartsFetcher: typeof fetch = (input, init) => {
+      const fetcher = config.codeartsFetcher ?? directFetch
+      if (!signal) return fetcher(input, init)
+      const upstreamSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+      return fetcher(input, {
+        ...init,
+        signal: upstreamSignal ? AbortSignal.any([signal, upstreamSignal]) : signal,
+      })
+    }
     // 旧客户端仍可能携带退役 provider 或历史账号 id。拒绝调用但不删除数据。
     const request = payload !== null && typeof payload === 'object'
       ? payload as Record<string, unknown> : undefined
@@ -1289,7 +1341,74 @@ function registerChannelPackEndpoints(
         const id = `${provider}-${shortId()}`
         const suffix = shortId().toUpperCase()
         const refName = `${provider.toUpperCase()}_ACCOUNT_${suffix}`
-if (provider === LOBSTERAI.id) {
+        const product = productById(provider)
+        if (product !== undefined) {
+          let state: string
+          let authUrl: string
+          try {
+            const authState = await fetchAuthState(undefined, undefined, product)
+            state = authState.state
+            authUrl = decorateLoginUrl(authState.authUrl, product)
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            throw new Error(`无法获取 ${product.displayName} 登录地址（Host 网络请求失败）：${reason}`)
+          }
+          const ref = credentialRef(refName)
+          await pool.addAccount({
+            id,
+            provider: product.id,
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+          const authInstance = product.id === CODEBUDDY.id
+            ? (config.buddy ?? new BuddyAuth(ctx, { product }))
+            : (config.workbuddy ?? new BuddyAuth(ctx, { product }))
+          runBuddyLoginFlow({ openBrowser: () => {}, state, product }).then(async (flow) => {
+            await ctx.credentials.set(ref, flow.access)
+            authInstance.scheduleRefresh()
+            const credential = parseBuddyCredential(flow.access)
+            await pool.updateAccount(id, {
+              nickname: credential?.nickname ?? id,
+              expiresAt: credential ? credentialExpiresAtMs(credential) : undefined,
+              refreshable: Boolean(credential?.refresh_token),
+            })
+          }).catch((err) => {
+            ctx.logger.warn(`[channel-pack] background ${product.id} login failed for ${id}: ${err}`)
+            void pool.removeAccount(id).catch(() => {})
+          })
+          return { ok: true, value: { accountId: id, loginUrl: authUrl } }
+        } else if (provider === 'codearts') {
+          const codeartsInstance = config.codearts ?? new CodeArtsAuth(ctx)
+          const started = await codeartsInstance.startLogin({ refName })
+          await pool.addAccount({
+            id,
+            provider: 'codearts',
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+          started.result.then(async (loginResult) => {
+            const credential = parseCodeArtsCredential(loginResult.access)
+            await pool.updateAccount(id, {
+              nickname: credential?.user_name !== undefined && credential.user_name.length > 0
+                ? credential.user_name
+                : id,
+              expiresAt: credential?.expires_at !== undefined
+                ? (Number.isNaN(Date.parse(credential.expires_at)) ? undefined : Date.parse(credential.expires_at))
+                : undefined,
+              refreshable: Boolean(credential?.refresh_token),
+            })
+          }).catch((error: unknown) => {
+            ctx.logger.warn(`[channel-pack] background codearts login failed for ${id}: ${String(error)}`)
+            void pool.removeAccount(id).catch(() => {})
+          })
+          return { ok: true, value: { accountId: id, loginUrl: started.loginUrl } }
+        } else if (provider === LOBSTERAI.id) {
 
           const started = await lobsterai.startLogin({ refName })
           await pool.addAccount({
@@ -1876,6 +1995,21 @@ if (provider === LOBSTERAI.id) {
               // ⚠️ Google 会**轮换 refresh_token**，`GeminiAuth` 内部已回写新值。
               await gemini.refreshAccountCredential(entry.credentialRef, pool, entry.id)
               break
+            case CODEBUDDY.id: {
+              const authInstance = config.buddy ?? new BuddyAuth(ctx, { product: CODEBUDDY })
+              await authInstance.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+              break
+            }
+            case WORKBUDDY.id: {
+              const authInstance = config.workbuddy ?? new BuddyAuth(ctx, { product: WORKBUDDY })
+              await authInstance.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+              break
+            }
+            case 'codearts': {
+              const codeartsInstance = config.codearts ?? new CodeArtsAuth(ctx)
+              await codeartsInstance.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+              break
+            }
             default:
               throw new Error(`Unknown provider: ${entry.provider}`)
           }
@@ -2376,6 +2510,40 @@ if (provider === LOBSTERAI.id) {
           )
           return { ok: true, value: { accounts: value } satisfies RpcCreditsStatusResponse }
         }
+        if (req.provider === 'codearts') {
+          const accounts = await pool.listAccounts(req.provider)
+          return {
+            ok: true,
+            value: {
+              accounts: accounts.map((entry) => ({ accountId: entry.id, nickname: entry.nickname, status: null })),
+            } satisfies RpcCreditsStatusResponse,
+          }
+        }
+        const buddyProduct = productById(req.provider)
+        if (buddyProduct) {
+          const accounts = await pool.listAccounts(req.provider)
+          if (req.provider === WORKBUDDY.id) {
+            return {
+              ok: true,
+              value: {
+                accounts: accounts.map((entry) => ({ accountId: entry.id, nickname: entry.nickname, status: null })),
+                windowDays: creditExpiringWindowDays(),
+              } satisfies RpcCreditsStatusResponse,
+            }
+          }
+          const value = await collectCreditsStatus<BuddyCredential, BuddyProduct>(accounts, buddyProduct, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            fetchStatus: (credential, p) => fetchCheckinStatus(credential, p),
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return {
+            ok: true,
+            value: {
+              accounts: value,
+              windowDays: creditExpiringWindowDays(),
+            } satisfies RpcCreditsStatusResponse,
+          }
+        }
         return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
       }
 
@@ -2583,6 +2751,33 @@ if (provider === LOBSTERAI.id) {
             value: { results, summary: computeClaimSummary(outcomes) } satisfies RpcCreditsClaimAllResponse,
           }
         }
+        if (req.provider === 'codearts') {
+          const value = await collectClaimResults<CodeArtsCredential, undefined>(accounts, undefined, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            claim: (credential) => claimCodeArtsDailyCheckin(credential, codeartsFetcher),
+            precheckStatus: false,
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
+        }
+        if (req.provider === WORKBUDDY.id) {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: 'WorkBuddy 国际版不支持每日签到（其后端没有签到接口）',
+            },
+          }
+        }
+        if (req.provider === CODEBUDDY.id) {
+          const value = await collectClaimResults<BuddyCredential, BuddyProduct>(accounts, CODEBUDDY, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            fetchStatus: (credential, p) => fetchCheckinStatus(credential, p),
+            claim: (credential, p) => claimDailyCheckin(credential, p),
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
+        }
         return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
       }
 
@@ -2594,6 +2789,28 @@ if (provider === LOBSTERAI.id) {
       case 'credits.balances': {
         const req = payload as RpcCreditsBalancesRequest
         const accounts = await pool.listAccounts(req.provider)
+        if (req.provider === 'codearts') {
+          const values = await collectCreditBalances<CodeArtsCredential, undefined>(accounts, undefined, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            fetchBalanceDetailed: async (credential) => {
+              const result = await fetchCodeArtsAccountInfoDetailed(credential, codeartsFetcher)
+              if (!result.ok) return { balance: null, error: `账户信息查询失败：${result.message}` }
+              const info = result.info
+              if (!info.isCreditPackage) {
+                return {
+                  balance: null,
+                  error: info.isTokenPackage
+                    ? 'Token 计费账户，无积分余额'
+                    : '非积分计费账户，无积分余额',
+                }
+              }
+              if (info.credit === undefined) return { balance: null, error: '未返回积分数据' }
+              return { balance: info.credit }
+            },
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
+        }
         if (req.provider === LOBSTERAI.id) {
           const values = await collectCreditBalances<LobsteraiCredential, typeof LOBSTERAI>(accounts, LOBSTERAI, {
             resolve: (ref) => ctx.credentials.resolve(ref),
@@ -2968,6 +3185,21 @@ if (provider === LOBSTERAI.id) {
             })
           }
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
+        }
+        const buddyProduct = productById(req.provider)
+        if (buddyProduct) {
+          const values = await collectCreditBalances<BuddyCredential, BuddyProduct>(accounts, buddyProduct, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            fetchBalance: (credential, p) => fetchCreditBalance(credential, p),
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return {
+            ok: true,
+            value: {
+              accounts: values,
+              windowDays: creditExpiringWindowDays(),
+            } satisfies RpcCreditsBalancesResponse,
+          }
         }
         return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
       }
