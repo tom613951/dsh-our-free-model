@@ -1,7 +1,9 @@
 /**
  * The free lane's wire facts, re-measured against the live gateway on 2026-10-14,
- * re-checked against the **v2** client fingerprint on 2026-10-16, and re-checked
- * against the session-encoding gate on 2026-10-17.
+ * re-checked against the **v2** client fingerprint on 2026-10-16, re-checked
+ * against the session-encoding gate on 2026-10-17, and re-aligned with the
+ * opencode2api v1.4.6 reference port on 2026-10-31 (family paths, per-request
+ * project id, canonical v2 token from src/o2a/version.js).
  *
  * These are the things that changed and that a future edit can silently break:
  * the lane's base path, the four session headers, the shape *and encoding* of
@@ -48,6 +50,7 @@ server.unref()
 process.env.OUR_FREE_MODEL_BASE = `http://127.0.0.1:${server.address().port}`
 
 const up = await import('../src/upstream.js')
+const { clientToolWireName } = await import('../src/o2a/tool-renames.js')
 const { postStreamed, getJson, readSse, CODE } = await import('../src/http.js')
 
 let failures = 0
@@ -58,11 +61,11 @@ const check = (name, actual, expected) => {
 }
 const declared = (body, name) => (body.tools ?? []).find(tool => (tool.function?.name ?? tool.name) === name)
 
-console.log('=== 1. the lane lives under /inference/v1 ===')
+console.log('=== 1. the lane follows the 2.1 client’s provider-family paths ===')
 {
-  check('chat model', up.endpointFor('cat-jam-free'), '/inference/v1/chat/completions')
-  check('responses model', up.endpointFor('muse-spark-1.3-contributor-free'), '/inference/v1/responses')
-  check('messages model', up.endpointFor('union-alpha'), '/inference/v1/messages')
+  check('chat model', up.endpointFor('cat-jam-free'), '/inference/openai/v1/chat/completions')
+  check('responses model', up.endpointFor('muse-spark-1.3-contributor-free'), '/inference/openai/v1/responses')
+  check('messages model', up.endpointFor('union-alpha'), '/inference/anthropic/v1/messages?beta=true')
   check('wire for chat', up.wireFor('cat-jam-free'), 'chat')
   check('wire for responses', up.wireFor('muse-spark-1.3-contributor-free'), 'responses')
   check('wire for messages', up.wireFor('union-alpha'), 'messages')
@@ -80,8 +83,17 @@ console.log('\n=== 2. the four v2 session headers, and no v1-only request header
   check('session id repeats it', headers['x-session-id'], session)
   // v1 sent `x-opencode-request`; v2 answers that header with 403 FreeTierError.
   check('no x-opencode-request', 'x-opencode-request' in headers, false)
-  check('the User-Agent is the canonical v2 token', headers['user-agent'], 'opencode/latest/2.0.26/cli')
-  check('streaming accept', headers.accept, 'text/event-stream')
+  check('the User-Agent is the canonical v2 token', headers['user-agent'], up.CLIENT_UA)
+  // The reference sends no accept header at all on the v2 lane (captured from
+  // its outbound bytes, 2026-10-31); the body's stream flag drives SSE.
+  check('no accept header on the v2 lane', 'accept' in headers, false)
+  check('an explicit accept override still ships', up.gatewayHeaders({ session, accept: 'application/json' }).accept, 'application/json')
+  // v1.4.6: the project id is a bare 40-hex id, fresh per request when the
+  // caller names no project — the shared `global` bucket arrived pre-burned.
+  const project = headers['x-opencode-project']
+  check('the project id is a bare 40-hex id', /^[0-9a-f]{40}$/.test(project), true)
+  check('a second request mints a fresh project id', up.gatewayHeaders({ session, stream: true })['x-opencode-project'] !== project, true)
+  check('a caller project of `global` passes through', up.gatewayHeaders({ session, project: 'global' })['x-opencode-project'], 'global')
 }
 
 console.log('\n=== 3. the session id must carry the descending encoding the gate accepts ===')
@@ -131,8 +143,9 @@ console.log('\n=== 4. the v2 tool gate: read + shell, official definitions, no t
   const map = up.applyFingerprint(caller, false)
   check('only one declaration carries the gate name', caller.tools.filter(tool => tool.function.name === 'read').length, 1)
   check('…and it is the official definition', declared(caller, 'read').function.parameters.required, ['path'])
-  check('the caller declaration survived under an alias', caller.tools.find(tool => tool.function.name === 'read_client').function.description, 'the caller read')
-  check('…and the alias restores the caller name', up.restoreToolName('read_client', map), 'read')
+  const callerWire = clientToolWireName('read')
+  check('the caller declaration survived under its opaque wire name', caller.tools.find(tool => tool.function.name === callerWire).function.description, 'the caller read')
+  check('…and the wire name restores the caller name', up.restoreToolName(callerWire, map), 'read')
 }
 
 console.log('\n=== 5. the User-Agent is the canonical v2 token, whatever the host attributes ===')
@@ -149,7 +162,7 @@ console.log('\n=== 5. the User-Agent is the canonical v2 token, whatever the hos
     timeoutMs: 5000,
   })
   const sent = seen[seen.length - 1]
-  check('the request reached the chat path', sent.url, '/inference/v1/chat/completions')
+  check('the request reached the chat path', sent.url, '/inference/openai/v1/chat/completions')
   check('the refused token is gone', /deepseek[-_]harness/i.test(sent.headers['user-agent'] ?? ''), false)
   check('the UA is the canonical v2 token', sent.headers['user-agent'], up.CLIENT_UA)
   check('…and carries no attribution suffix', sent.headers['user-agent'].includes(' '), false)

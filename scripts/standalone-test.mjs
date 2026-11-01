@@ -36,7 +36,9 @@ const upstream = http.createServer((req, res) => {
   const chunks = []
   req.on('data', chunk => chunks.push(chunk))
   req.on('end', () => {
-    if (req.url.startsWith('/inference/v1/')) {
+    // The 2.1 client groups /inference routes by provider family
+    // (/inference/openai/v1/...), so the fingerprint mock matches the origin prefix.
+    if (req.url.startsWith('/inference/')) {
       anonymousRequests.push({ method: req.method, headers: req.headers })
       // v2 指纹：上游只认 `opencode/<channel>/<version>/<client>` 这一整串。
       // 旧实现模拟的是「按名字拒掉独立服务的归属 UA」，那条规则属于 v1；
@@ -261,7 +263,7 @@ try {
     assert.ok(anonymousRequests.some(req => req.method === 'GET'))
     assert.ok(anonymousRequests.filter(req => req.method === 'POST').length >= 4)
     for (const req of anonymousRequests) {
-      assert.equal(req.headers['user-agent'], 'opencode/latest/2.0.26/cli')
+      assert.equal(req.headers['user-agent'], 'opencode/latest/2.1.1/cli')
     }
   })
   await check('unknown models are refused before spending an upstream call', async () => {

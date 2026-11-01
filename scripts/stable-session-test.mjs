@@ -7,7 +7,11 @@ const previous = process.env.DSH_HOME
 process.env.DSH_HOME = scratch
 try {
   const up = await import('../src/upstream.js?stable-session-test=first')
-  const legacy = up.canonicalizeSession('legacy')
+  // A pre-port id, built exactly as the old canonicalizeSession emitted it:
+  // descending encoding, but a date the hash happened to land on (1970) —
+  // shape-valid, date-implausible, answered 429 upstream.
+  const legacyValue = ~(0x001b6b2b7abdn << 12n | 1n) & 0xffffffffffffn
+  const legacy = `ses_${legacyValue.toString(16).padStart(12, '0')}${up.mintSessionId().slice(16)}`
   const real = up.mintSessionId(Date.now() - 1000)
   fs.mkdirSync(path.join(scratch, 'our-free-model'), { recursive: true })
   const file = path.join(scratch, 'our-free-model/session-map.json')
@@ -18,7 +22,14 @@ try {
   assert.notEqual(upgraded, legacy)
   assert.ok(up.isCanonicalSession(upgraded))
   const decoded = (~BigInt('0x' + upgraded.slice(4, 16)) & 0xffffffffffffn) >> 12n
-  assert.ok(decoded >= (BigInt(before) & 0xfffffffffn) && decoded <= (BigInt(after) & 0xfffffffffn))
+  // Since the o2a port (src/o2a/identity.js) the mint draws its date from the
+  // slow clock: today's UTC midnight minus at most 30 days — plausible, which
+  // is the property the upstream enforces, not "this very second".
+  // The wire's time part is a 36-bit millisecond phase (o2a/identity.js), so
+  // plausibility means "within the last month of the current phase cycle".
+  const { phaseAgeMs } = await import('../src/o2a/identity.js')
+  const age = phaseAgeMs(Number(decoded), after)
+  assert.ok(age <= 31 * 86400000, `re-mint phase age ${age}ms must be plausible (within 31 days)`)
   assert.equal(up.sessionForConversation('legacy'), upgraded)
   assert.equal(up.sessionForConversation('real'), real)
   const caller = up.mintSessionId()

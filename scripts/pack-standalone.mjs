@@ -41,7 +41,12 @@ const sourceFiles = [
     'store', 'stream', 'subscriptions', 'subscription-completion', 'subscription-adapter', 'token-saver', 'trust', 'upstream', 'vault', 'vault-data', 'vault-anchor']
     .map(name => `src/${name}.js`),
   ...['completion', 'runtime', 'stats'].map(name => `src/core/${name}.js`),
+  'src/core.js',
   'src/bun-fetch.js',
+  // The opencode2api port the free lane's shaping layer delegates to
+  // (src/o2a/SYNC.md), shipped as the release bundle built by
+  // build-legacy-payload.mjs — the official assets are inlined into it.
+  'src/o2a.js',
   'src/providers/index.js',
   'src/providers/registry.json',
   'src/route/classify.js',

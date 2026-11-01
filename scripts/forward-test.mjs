@@ -27,6 +27,8 @@ import net from 'node:net'
 import assert from 'node:assert/strict'
 import { startForwardServer, startLanRelay, resolveLoopbackBind, bindForwardPort, classifyBindError, startHeartbeat, SSE_HEARTBEAT_MS, rankLanAddresses } from '../src/forward.js'
 import { toToolDefs } from '../src/messages.js'
+import { CLIENT_TOOL_PREFIX, clientToolWireName } from '../src/o2a/tool-renames.js'
+import { V2_OFFICIAL_TOOL_ORDER } from '../src/o2a/official-tools.js'
 import { readStream } from '../src/stream.js'
 import { applyFingerprint } from '../src/upstream.js'
 import { fromOpenAiMessages } from '../index.js'
@@ -639,21 +641,25 @@ check('the adapter conversion keeps every caller tool', () => {
   assert.equal(declared.length, callerTools.length)
 })
 
-check('a non-empty caller list keeps its real tools and gains the gate names', () => {
+check('a non-empty caller list is renamed opaquely and gains the official set', () => {
   const body = { tools: toToolDefs([normalizeTool(openAiTool('pwsh')), normalizeTool(openAiTool('glob'))], 'chat') }
   applyFingerprint(body, false)
-  // v2 keeps the caller's own names (`pwsh` stays `pwsh`) and appends the two
-  // gate declarations under their official names.
-  assert.deepEqual(body.tools.map(tool => tool.function.name), ['pwsh', 'glob', 'read', 'shell'])
+  // The reference shaping (o2a) renames every client tool to an opaque wire
+  // name and appends the full official set — the vocabulary gate refuses a
+  // body that still reads as another client's session.
+  const names = body.tools.map(tool => tool.function.name)
+  const clientWires = names.filter(name => name.startsWith(CLIENT_TOOL_PREFIX))
+  assert.deepEqual(clientWires, [clientToolWireName('pwsh'), clientToolWireName('glob')])
+  assert.deepEqual(names.filter(name => !name.startsWith(CLIENT_TOOL_PREFIX)), V2_OFFICIAL_TOOL_ORDER)
   assert.equal(String(body.tools[0].function.description).includes('unavailable'), false)
   assert.equal(String(body.tools[1].function.description).includes('unavailable'), false)
   assert.equal(body.tool_choice, undefined)
 })
 
-check('an empty caller list still gets the gate names, and no tool_choice', () => {
+check('an empty caller list still gets the official set, and no tool_choice', () => {
   const body = { tools: [] }
   applyFingerprint(body, false)
-  assert.deepEqual(body.tools.map(tool => tool.function.name), ['read', 'shell'])
+  assert.deepEqual(body.tools.map(tool => tool.function.name), [...V2_OFFICIAL_TOOL_ORDER])
   // v1 forced `tool_choice: 'none'` here; v2 answers that value with 403.
   assert.equal(body.tool_choice, undefined)
 })
@@ -661,7 +667,7 @@ check('an empty caller list still gets the gate names, and no tool_choice', () =
 await checkAsync('a caller tool reusing a gate name is mapped back to the caller name', async () => {
   const body = { tools: toToolDefs([normalizeTool(openAiTool('read'))], 'chat') }
   const map = applyFingerprint(body, false)
-  assert.equal(map.get('read_client'), 'read')
+  assert.equal(map.get(clientToolWireName('read')), 'read')
 })
 
 await checkAsync('the lane receives the caller tools the client sent', async () => {

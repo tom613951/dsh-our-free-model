@@ -5,7 +5,7 @@ import { chmod, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/prom
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const revision = 'c551a229975653b7ae5b6a35e2278c983a272e06'
+export const revision = '6a900e0d048e592cbc9120dd2c3f515aab9ef04a'
 const upstream = 'https://github.com/yetone/magpie.git'
 const version = `ofm-${revision.slice(0, 12)}`
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -76,7 +76,9 @@ async function main() {
   const executable = `magpie-${process.platform}-${process.arch}${process.platform === 'win32' ? '.exe' : ''}`
   await mkdir(path.join(vendor, 'bin'), { recursive: true })
   const temporary = path.join(scratch, executable)
-  const flags = ['-tags', 'nogui', '-trimpath', '-buildvcs=true', '-ldflags', `-X main.version=${version}`]
+  // Upstream's own Makefile releases with `-s -w`; the stripped binary also
+  // keeps its gzip payload small enough for the legacy updater's 80-file cap.
+  const flags = ['-tags', 'nogui', '-trimpath', '-buildvcs=true', '-ldflags', `-s -w -X main.version=${version}`]
   await run('go', ['build', ...flags, '-o', temporary, '.'], source, false)
   const buildInfo = await run('go', ['version', '-m', temporary])
   if (!buildInfo.includes(`vcs.revision=${revision}`) || buildInfo.includes('vcs.modified=true')) {

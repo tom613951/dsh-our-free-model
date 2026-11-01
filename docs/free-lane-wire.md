@@ -98,3 +98,63 @@ vendored 的 `vendor/channel-pack/src/opencode*.ts`）保持同一套形状。
 名字、定义逐字、UA、头集、别名、`tool_choice`、档位收敛）。三者都在
 `npm run test:contributor` 内。
 
+---
+
+# 对齐参考网关 opencode2api v1.4.6（2026-10-31）
+
+10 月下旬的几次 429/403 复发把三件新事实钉死（每次都有单变量实测）：
+
+1. **词汇闸门**：请求体里只要还带另一个客户端的工具词汇——Claude Code 的
+   `ReportFindings` + `ScheduleWakeup` 同时出现即可——上游就 429
+   （2026-10-30 实测；当时只给 DSH 的两个工具建了别名表，是同一发现的特例）。
+2. **官方提示闸门**：工具与请求头全对、IP 干净，缺官方 CLI 系统提示仍 429；
+   补上 base prompt + `<env>` + skills 即 200（2026-10-28 实测，先用裸 env 块
+   压住；完整提示是参考实现的形状）。
+3. **时间戳合理性**：会话 id 形状/编码全对但内嵌日期不可信（纯哈希落到 1970）
+   → 429；真实近日期 → 200（2026-10-28 A/B）。
+
+这三条正是 [opencode2api](https://github.com/jasonxu114514/opencode2api)
+（本仓库自 2026-10-17 起跟随的参考实现）在其 v1.4.x 里逐项解决的事实。因此
+2026-10-31 起匿名道的请求整形层整体换成它的 **v1.4.6** 移植：`src/o2a/`
+（文件对照、七条有意偏差、升级手册见 `src/o2a/SYNC.md`）。`src/upstream.js`
+保留为适配层，公开导出不变。
+
+## 本次的线上形状（v1.4.6）
+
+| 项目 | 之前（2026-10-28 形状） | 现在（v1.4.6 移植） |
+| --- | --- | --- |
+| 客户工具 | 原名保留（两个已知坏名进别名表） | **全部改名**为 `clint_<sha256[:12]>`，`tool_choice`/历史/`input` 调用行同步改名，响应侧折叠还原 |
+| 官方工具集 | `read` + `shell` 两个逐字定义 | **13 个官方工具全量**（捕获自 2.1 CLI 的 `opencode_tools.json`；chat 线带 `strict:false`，Windows 主机 shell 描述写 powershell） |
+| 系统提示 | 裸 `<env>` 块 | **官方 CLI 提示全量**：base prompt + `<env>`（模型/目录/平台/日期）+ 内置 skills；已带 marker 的请求体跳过 |
+| `x-opencode-project` | 恒 `global`（共享配额桶） | **每请求一个 40-hex**（调用方给的 `global`/git commit 直通，其余哈希成 40-hex） |
+| 端点 | `/inference/v1/…` | **族路径** `/inference/openai/v1/…`、`/inference/anthropic/v1/messages?beta=true`（2.1 客户端形状；旧扁平路径仍可用） |
+| UA | `opencode/latest/2.0.26/cli` | `opencode/latest/2.1.1/cli`（跟随参考实现的 `v2ClientVersion`） |
+| Chat 体 | — | 流式补 `stream_options.include_usage:true`；无上限时补 `max_completion_tokens:32000` |
+| 会话铸造 | 真时间戳铸造 + 持久化 | 慢钟铸造（今日 UTC 零点 − ≤30 天哈希偏移，降序编码，进程盐）；持久化保留，日期离窗（±400 天）的旧 id 重铸 |
+
+Anthropic 线新增 `anthropic-beta: interleaved-thinking-2025-05-14` 头。保留的
+插件侧偏差（占位提示、`tool_choice:'none'` 兜底清除、幂等整形、块对象保留、
+非流式不强制、跨重启会话、copy-on-write）逐条列在 `src/o2a/SYNC.md` 第 2 节。
+
+## 依据
+
+- 参考实现 v1.4.6 源码（release 2026-10-29，commit `58f5667`）逐文件对照；
+  它对本车道上游做过同样的单变量实测，其 release 说明与本文件第 1–3 条事实一致。
+- **线字节对照（同日）**：让 v1.4.6 网关把整形后的请求发给本机明文 echo 服务
+  器，抓到它的最终 outbound（头集、24868B body、13 工具、9579B 系统提示），
+  与本移植逐字段 diff：键集、工具集、系统提示、UA/project/会话形状全部一致；
+  唯一差异是它**不发 `accept` 头** —— 本移植已对齐（默认不发，显式覆盖才发）。
+- **重放判定无效（同日）**：同出口同刻，v1.4.6 自己的字节经 Go 客户端 200、
+  经 curl/python 转发 429（同为 `FreeUsageLimitError`）—— 上游对 TLS/HTTP 客
+  户端指纹敏感，且 429 报文不区分「IP 配额烧尽」与「非官方客户端」。用 curl
+  重放本车道做 200/429 结论（包括本文件早年的手写对照）须以「客户端指纹相同」
+  为前提；跨客户端的对照一律无效。判定只能用本车道自己的客户端（插件 =
+  Node/Bun）或参考网关本体。
+
+回归测试：`scripts/fingerprint-test.mjs`（不透明改名 + 13 工具集 + 幂等）、
+`scripts/free-lane-wire-test.mjs`（族路径、40-hex project id、UA、四会话头、
+无 accept 头）、`scripts/opencode-parity-test.mjs`（lane 与 channel pack 的重叠契约）、
+`scripts/wire-tool-alias-test.mjs`（改名 → 流式还原 → 宿主分发）、
+`scripts/free-lane-compat-test.mjs`（三线提示注入 + 传输层）。全部在 `npm test` 内。
+
+

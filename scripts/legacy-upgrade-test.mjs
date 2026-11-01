@@ -72,7 +72,10 @@ try {
     historical.dataDir = path.join(scratch, historical.version, 'private-data')
     fs.mkdirSync(historical.pkgDir, { recursive: true })
     fs.mkdirSync(historical.dataDir, { recursive: true })
-    execFileSync('tar', ['-xf', archive, '-C', historical.pkgDir], { windowsHide: true })
+    // bsdtar reads a drive-letter archive; an MSYS GNU tar earlier on the PATH
+    // would take "D:" for a remote host and refuse the file.
+    const tar = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar'
+    execFileSync(tar, ['-xf', archive, '-C', historical.pkgDir], { windowsHide: true })
     fs.writeFileSync(path.join(historical.dataDir, 'user-settings.json'), '保留用户数据\n')
     await check(`${historical.version} 原版拒绝旧问题夹具，并接受当前 ${rows.length} 文件`, () => {
       historical.module.parseManifest(manifest)

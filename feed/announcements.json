@@ -2,6 +2,18 @@
   "$schema": "./announcements.schema.md",
   "announcements": [
     {
+      "id": "2026-11-01-v2.8.0-plugin-release",
+      "title": "v2.8.0：免费道整形层对齐参考网关 v1.4.6，引擎一键跟进",
+      "level": "update",
+      "pinned": true,
+      "createdAt": "2026-11-01T04:00:00Z",
+      "link": {
+        "url": "https://github.com/Ebony-Vinyl/dsh-our-free-model/releases/tag/v2.8.0",
+        "label": "查看插件更新说明"
+      },
+      "html": "<p><b>2.8.0 把匿名免费道的请求整形整体换成参考网关 opencode2api v1.4.6 的逐文件移植。</b>所有客户工具改名成不透明线名再上线（外来客户端的工具词汇一概不发），补齐官方 2.1 CLI 的 13 个逐字工具定义与全量官方系统提示；每个请求带一个全新的 40-hex 项目 id，配额不再挤在共享的 global 桶里；端点换成 2.1 客户端的族路径；会话铸造走慢钟，日期永远落在上游接受窗口内。此前几轮「形状全对仍 429」的复发都源于这三类门禁，移植后一并解决。</p><p>自带 Magpie 引擎跟进到上游 2026-10-31 的 6a900e0d，构建改用上游 release 同款裁剪旗标，gzip 载荷从 45.3 MB 降到 27.2 MB——发布包 77 个文件，重回旧版升级器的 80 文件上限之内。新增 <code>update:magpie</code> 命令：以后引擎跟进是一条命令，失败自动回滚。引擎设置页一处窄面板下数字输入被裁一半的问题同版修复。npm test 新增发布 bundle 新鲜度守卫，改源码不重打包会在测试里当场红。</p><p>本次仅发布插件包，桌面应用版本与安装包不随本次升级更新。npm 渠道同步发布 <b>@ebony-vinyl/dsh-our-free-model@2.8.0</b>；npm 上那个裸名的 dsh-our-free-model 仍是第三方打包，请勿安装。</p>"
+    },
+    {
       "id": "2026-10-31-v2.7.4-plugin-release",
       "title": "v2.7.4：社区修复合并与稳定性大扫除",
       "level": "update",

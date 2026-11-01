@@ -31,10 +31,14 @@ if (!['all', 'contributor', 'release'].includes(options.mode)) {
   process.exit(1)
 }
 const { mode, only } = options
-const releaseSuites = new Set(['manifest', 'release', 'catalog', 'legacy-upgrade', 'engine-payload'])
+const releaseSuites = new Set(['manifest', 'legacy-payload', 'release', 'catalog', 'legacy-upgrade', 'engine-payload'])
 
 const suites = [
   ['manifest', 'build-manifest.mjs', ['--check']],
+  // The shipped bundles (token-saver, o2a, core) and the engine parts must
+  // match their sources; a stale src/o2a.js would make every suite below test
+  // yesterday's shaping while src/o2a/ already looks updated.
+  ['legacy-payload', 'build-legacy-payload.mjs', ['--check']],
   ['release', 'release-e2e.mjs', []],
   ['legacy-upgrade', 'legacy-upgrade-test.mjs', mode === 'contributor' ? [] : ['--production']],
   ['engine-payload', 'engine-payload-test.mjs', []],
