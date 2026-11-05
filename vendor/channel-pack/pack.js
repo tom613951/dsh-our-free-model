@@ -32092,6 +32092,7 @@ var CodeArtsAdapter = class extends LlmAdapter {
         extraSignedHeaders
       );
       const headers = new Headers(attributionHeaders());
+      headers.delete("user-agent");
       signed.forEach((value, key) => {
         if (key !== "content-type") headers.set(key, value);
       });
@@ -32220,7 +32221,7 @@ var CodeArtsAdapter = class extends LlmAdapter {
           const probe = await this.queryQueueStatus(credential, options.model, options.signal);
           if (probe === void 0 || probe.status === "working") {
             const code = httpErrorCode(response.status, errorText);
-            throw new LlmError3(`codearts: model request failed with HTTP ${response.status}`, code, { status: response.status });
+            throw new LlmError3(`codearts: model request failed with HTTP ${response.status}${errorText ? `: ${errorText}` : ""}`, code, { status: response.status });
           }
         }
       }
