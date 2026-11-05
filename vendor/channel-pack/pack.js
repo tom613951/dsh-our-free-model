@@ -30158,7 +30158,7 @@ var OPENGW_GATEWAY_CONFIG_URL = "https://opengw.developer.huaweicloud.com/api/v1
 var SNAP_MODEL_BUILTIN_URL = "https://snap-access.cn-north-4.myhuaweicloud.com/v1/model/builtin";
 var CODEARTS_MODELS_CACHE_FILENAME = "codearts_models.json";
 var CODEARTS_BENEFIT_CACHE_FILENAME = "codearts_benefit_models.json";
-var CODEARTS_BENEFIT_FALLBACK = ["glm-5.3-flash", "deepseek-v4.1-flash"];
+var CODEARTS_BENEFIT_FALLBACK = [];
 var FETCH_TIMEOUT_MS = 1e4;
 var MODEL_REFRESH_INTERVAL_MS = 2 * 36e5;
 var memoryCache;
@@ -30222,8 +30222,10 @@ async function fetchCodeArtsRemoteModels(credential, fetcher = directFetch) {
   const models = [];
   const seen = /* @__PURE__ */ new Set();
   const benefitIds = [];
+  let gatewayQueried = false;
   const gatewayText = await fetchSignedGet(fetcher, OPENGW_GATEWAY_CONFIG_URL, ak, sk, st);
   if (gatewayText !== void 0) {
+    gatewayQueried = true;
     const arr = extractJsonArray(gatewayText, ["result", "models"]);
     if (arr !== void 0) {
       for (const item of arr) {
@@ -30255,7 +30257,7 @@ async function fetchCodeArtsRemoteModels(credential, fetcher = directFetch) {
       }
     }
   }
-  if (benefitIds.length > 0) {
+  if (gatewayQueried) {
     setBenefitMemoryCache(benefitIds);
     saveBenefitCache(benefitIds);
   }
@@ -30323,6 +30325,18 @@ function isCodeArtsBenefitModel(model) {
   if (benefitMemoryCache === void 0) benefitMemoryCache = loadBenefitCache();
   if (benefitMemoryCache !== void 0 && benefitMemoryCache.includes(model)) return true;
   return CODEARTS_BENEFIT_FALLBACK.includes(model);
+}
+function dropCodeArtsBenefitModel(model) {
+  if (benefitMemoryCache === void 0) benefitMemoryCache = loadBenefitCache() ?? [];
+  benefitMemoryCache = benefitMemoryCache.filter((id) => id !== model);
+  saveBenefitCache(benefitMemoryCache);
+}
+function addCodeArtsBenefitModel(model) {
+  if (benefitMemoryCache === void 0) benefitMemoryCache = loadBenefitCache() ?? [];
+  if (!benefitMemoryCache.includes(model)) {
+    benefitMemoryCache = [...benefitMemoryCache, model];
+    saveBenefitCache(benefitMemoryCache);
+  }
 }
 
 // vendor/channel-pack/src/message-shape.ts
@@ -32062,11 +32076,12 @@ var CodeArtsAdapter = class extends LlmAdapter {
     let queueAttempts = 0;
     let authRefreshed = false;
     let benefitHeaderDropped = false;
+    let benefitHeaderAdded = false;
     const rateLimitTried = /* @__PURE__ */ new Set();
     if (currentAccountId) rateLimitTried.add(currentAccountId);
     const isBenefitModel = isCodeArtsBenefitModel(options.model);
     for (; ; ) {
-      const extraSignedHeaders = isBenefitModel && !benefitHeaderDropped ? { maas_type: "benefit" } : void 0;
+      const extraSignedHeaders = (isBenefitModel || benefitHeaderAdded) && !benefitHeaderDropped ? { maas_type: "benefit" } : void 0;
       const signed = await signRequestHuawei(
         credential.access_key_id,
         credential.secret_access_key,
@@ -32122,7 +32137,8 @@ var CodeArtsAdapter = class extends LlmAdapter {
             throw new LlmError3(message2, QUOTA_EXCEEDED_CODE, { status: 200 });
           }
           if (error instanceof SseQueueRetryError) {
-          } else if (error instanceof LlmError3 && error.code === BENEFIT_NOT_FOUND_CODE && isBenefitModel && !benefitHeaderDropped) {
+          } else if ((error instanceof LlmError3 || error?.code === BENEFIT_NOT_FOUND_CODE) && error?.code === BENEFIT_NOT_FOUND_CODE && (isBenefitModel || benefitHeaderAdded) && !benefitHeaderDropped) {
+            dropCodeArtsBenefitModel(options.model);
             benefitHeaderDropped = true;
             continue;
           } else {
@@ -32189,6 +32205,16 @@ var CodeArtsAdapter = class extends LlmAdapter {
               "QUOTA_EXCEEDED"
             );
           }
+        }
+        if (response.status === 404 && errorText.includes("The model is not registered") && !benefitHeaderAdded && !isBenefitModel) {
+          addCodeArtsBenefitModel(options.model);
+          benefitHeaderAdded = true;
+          continue;
+        }
+        if ((isBenefitModel || benefitHeaderAdded) && !benefitHeaderDropped && (errorText.includes("TM.00001041") || errorText.includes("unsupported model") || errorText.includes("benefit not found") || errorText.includes("4004"))) {
+          dropCodeArtsBenefitModel(options.model);
+          benefitHeaderDropped = true;
+          continue;
         }
         if (!isQueueError(response.status, errorText)) {
           const probe = await this.queryQueueStatus(credential, options.model, options.signal);
@@ -32346,7 +32372,7 @@ var CodeArtsAdapter = class extends LlmAdapter {
             if (isSseQueueErrorCode(errorCode)) {
               throw new SseQueueRetryError(errorCode, message2);
             }
-            if (errorCode === CODEARTS_BENEFIT_NOT_FOUND_ERROR_CODE || errorCode === "4004") {
+            if (errorCode === CODEARTS_BENEFIT_NOT_FOUND_ERROR_CODE || errorCode === "4004" || message2.includes("benefit not found")) {
               throw new LlmError3(`codearts: ${message2}`, BENEFIT_NOT_FOUND_CODE, { status: 200 });
             }
             throw new LlmError3(`codearts: ${message2}`, "INVALID_REQUEST", { status: 200 });
