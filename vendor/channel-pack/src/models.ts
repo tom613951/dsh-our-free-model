@@ -50,7 +50,7 @@ const CODEARTS_BENEFIT_CACHE_FILENAME = 'codearts_benefit_models.json'
  * 尤其注意 gateway/config 返回的是它们的**带日期后缀**形态
  * （`deepseek-v4-flash-0731`），归一化后落到这两个 id —— 绝不能连带标成 benefit。
  */
-export const CODEARTS_BENEFIT_FALLBACK: readonly string[] = ['glm-5.3-flash', 'deepseek-v4.1-flash']
+export const CODEARTS_BENEFIT_FALLBACK: readonly string[] = []
 
 /** 动态模型拉取超时（ms）。 */
 const FETCH_TIMEOUT_MS = 10_000
@@ -177,9 +177,11 @@ export async function fetchCodeArtsRemoteModels(
   // 决定我们发送的 id 的 benefit 属性。
   const benefitIds: string[] = []
 
+  let gatewayQueried = false
   // 1. opengw gateway/config — benefit 模型（glm-5.3-flash 等）
   const gatewayText = await fetchSignedGet(fetcher, OPENGW_GATEWAY_CONFIG_URL, ak, sk, st)
   if (gatewayText !== undefined) {
+    gatewayQueried = true
     const arr = extractJsonArray(gatewayText, ['result', 'models'])
     if (arr !== undefined) {
       for (const item of arr) {
@@ -218,8 +220,9 @@ export async function fetchCodeArtsRemoteModels(
   }
 
   // 持久化 benefit 集合：chat 请求签名时据此决定是否带 maas_type。
-  // 仅在确实从 gateway 拿到模型时写入，避免把空集合覆盖掉可用缓存。
-  if (benefitIds.length > 0) {
+  // 仅在网关端点正常响应时更新（有 benefit 写入列表，无 benefit / 4000 则写入空列表），
+  // 避免网关临时网络故障把现有可用缓存冲掉。
+  if (gatewayQueried) {
     setBenefitMemoryCache(benefitIds)
     saveBenefitCache(benefitIds)
   }
@@ -364,4 +367,20 @@ export function isCodeArtsBenefitModel(model: string): boolean {
   if (benefitMemoryCache === undefined) benefitMemoryCache = loadBenefitCache()
   if (benefitMemoryCache !== undefined && benefitMemoryCache.includes(model)) return true
   return CODEARTS_BENEFIT_FALLBACK.includes(model)
+}
+
+/** 动态将某个模型移出 benefit 集合（当服务端返回 benefit not found、4004 或 TM.00001041 时）。 */
+export function dropCodeArtsBenefitModel(model: string): void {
+  if (benefitMemoryCache === undefined) benefitMemoryCache = loadBenefitCache() ?? []
+  benefitMemoryCache = benefitMemoryCache.filter((id) => id !== model)
+  saveBenefitCache(benefitMemoryCache)
+}
+
+/** 动态将某个模型加入 benefit 集合（当服务端报 404 The model is not registered 时）。 */
+export function addCodeArtsBenefitModel(model: string): void {
+  if (benefitMemoryCache === undefined) benefitMemoryCache = loadBenefitCache() ?? []
+  if (!benefitMemoryCache.includes(model)) {
+    benefitMemoryCache = [...benefitMemoryCache, model]
+    saveBenefitCache(benefitMemoryCache)
+  }
 }

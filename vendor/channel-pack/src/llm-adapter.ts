@@ -10,7 +10,7 @@ import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { settingsNamespaceFor } from './settings-compat.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
-import { isCodeArtsBenefitModel } from './models.js'
+import { isCodeArtsBenefitModel, dropCodeArtsBenefitModel, addCodeArtsBenefitModel } from './models.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { directFetch } from './direct-fetch.js'
 import { signRequestHuawei } from './sign.js'
@@ -1121,6 +1121,8 @@ export class CodeArtsAdapter extends LlmAdapter {
     // 该账号不带 benefit 包时去掉 `maas_type: benefit` 头重试一次：
     // 只试一次，避免与真实失败互相掩盖。
     let benefitHeaderDropped = false
+    // 模型报 404 The model is not registered 时追加 `maas_type: benefit` 重试一次
+    let benefitHeaderAdded = false
     // 因限流已尝试过的账号 id：保证每个账号只试一次，试完才判定"全部受限"。
     const rateLimitTried = new Set<string>()
     if (currentAccountId) rateLimitTried.add(currentAccountId)
@@ -1138,7 +1140,7 @@ export class CodeArtsAdapter extends LlmAdapter {
       // deepseek-v4.1-flash 等其它 benefit 模型调用失败（用户报障：
       // 发消息后报 Insufficient Balance / QUOTA —— 缺该头时后端按非 benefit
       // 通道处理该模型）。实证见 CODEARTS_BENEFIT_FALLBACK 注释。
-      const extraSignedHeaders = isBenefitModel && !benefitHeaderDropped ? { maas_type: 'benefit' } : undefined
+      const extraSignedHeaders = (isBenefitModel || benefitHeaderAdded) && !benefitHeaderDropped ? { maas_type: 'benefit' } : undefined
       const signed = await signRequestHuawei(
         credential.access_key_id,
         credential.secret_access_key,
@@ -1214,12 +1216,13 @@ export class CodeArtsAdapter extends LlmAdapter {
           if (error instanceof SseQueueRetryError) {
             // 落入下方排队重试
           } else if (
-            error instanceof LlmError
-            && error.code === BENEFIT_NOT_FOUND_CODE
-            && isBenefitModel
+            (error instanceof LlmError || (error as { code?: string })?.code === BENEFIT_NOT_FOUND_CODE)
+            && ((error as { code?: string })?.code === BENEFIT_NOT_FOUND_CODE)
+            && (isBenefitModel || benefitHeaderAdded)
             && !benefitHeaderDropped
           ) {
-            // 该账号没有 benefit 包：去掉 maas_type 头重试一次
+            // 该账号没有 benefit 包：去掉 maas_type 头重试一次，并记入缓存避免后续再次走弯路
+            dropCodeArtsBenefitModel(options.model)
             benefitHeaderDropped = true
             continue
           } else {
@@ -1307,6 +1310,24 @@ export class CodeArtsAdapter extends LlmAdapter {
               'QUOTA_EXCEEDED',
             )
           }
+        }
+        // 404 The model is not registered: 缺 maas_type: benefit 头，追加并重试一次
+        if (response.status === 404 && errorText.includes('The model is not registered') && !benefitHeaderAdded && !isBenefitModel) {
+          addCodeArtsBenefitModel(options.model)
+          benefitHeaderAdded = true
+          continue
+        }
+        // 账号没有 benefit 包或模型不支持 benefit：去掉 maas_type 头重试一次
+        // 华为云对于未开通 benefit 的模型带 maas_type 可能返回 400 TM.00001041、4004、unsupported model
+        if ((isBenefitModel || benefitHeaderAdded) && !benefitHeaderDropped && (
+          errorText.includes('TM.00001041')
+          || errorText.includes('unsupported model')
+          || errorText.includes('benefit not found')
+          || errorText.includes('4004')
+        )) {
+          dropCodeArtsBenefitModel(options.model)
+          benefitHeaderDropped = true
+          continue
         }
         if (!isQueueError(response.status, errorText)) {
           // 非 TM.00001041 错误也未必没排队：openpangu 等模型的并发限流
@@ -1638,7 +1659,7 @@ export class CodeArtsAdapter extends LlmAdapter {
             if (isSseQueueErrorCode(errorCode)) {
               throw new SseQueueRetryError(errorCode, message)
             }
-            if (errorCode === CODEARTS_BENEFIT_NOT_FOUND_ERROR_CODE || errorCode === '4004') {
+            if (errorCode === CODEARTS_BENEFIT_NOT_FOUND_ERROR_CODE || errorCode === '4004' || message.includes('benefit not found')) {
               // 账号没有 benefit 包（积分制账户）：交给 stream() 去掉该头重试
               throw new LlmError(`codearts: ${message}`, BENEFIT_NOT_FOUND_CODE, { status: 200 })
             }
