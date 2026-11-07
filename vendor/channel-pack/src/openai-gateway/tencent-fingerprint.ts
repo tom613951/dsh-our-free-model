@@ -103,6 +103,13 @@ const CONTENT_FINGERPRINTS: readonly ContentFingerprint[] = [
     replace: 'You are an AI assistant',
     note: '变种（无末尾句号）',
   },
+  {
+    // DSH 系统提示词路径解析说明首句：`Tokens prefixed with @ are paths the user explicitly referenced.`。
+    // 腾讯网关做非官方客户端指纹匹配，命中立即 400 + code 11128 "Illegal API invocation from an unapproved channel"。
+    find: 'Tokens prefixed with @ are paths the user explicitly referenced',
+    replace: 'Paths prefixed with @ are paths the user explicitly referenced',
+    note: '本机 2026-11-07 实测 copilot.tencent.com 与 workbuddy.ai 双端点拦截',
+  },
 
 ]
 
