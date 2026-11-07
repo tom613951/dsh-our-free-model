@@ -32658,6 +32658,13 @@ var CONTENT_FINGERPRINTS = [
     find: "You are an AI agent powered by DeepSeek Harness",
     replace: "You are an AI assistant",
     note: "\u53D8\u79CD\uFF08\u65E0\u672B\u5C3E\u53E5\u53F7\uFF09"
+  },
+  {
+    // DSH 系统提示词路径解析说明首句：`Tokens prefixed with @ are paths the user explicitly referenced.`。
+    // 腾讯网关做非官方客户端指纹匹配，命中立即 400 + code 11128 "Illegal API invocation from an unapproved channel"。
+    find: "Tokens prefixed with @ are paths the user explicitly referenced",
+    replace: "Paths prefixed with @ are paths the user explicitly referenced",
+    note: "\u672C\u673A 2026-11-07 \u5B9E\u6D4B copilot.tencent.com \u4E0E workbuddy.ai \u53CC\u7AEF\u70B9\u62E6\u622A"
   }
 ];
 function escapeRegExp(literal) {
