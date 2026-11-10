@@ -220,6 +220,9 @@ function describeHttpFailure(status: number, text: string): string {
     // 非 JSON（网关 HTML 错误页等）：截断原文，避免把整页 HTML 塞进 UI。
     detail = text.trim().slice(0, 200)
   }
+  if (detail.includes('APIG.0301') || detail.includes('AK access failed') || detail.includes('verify ak sk signature fail')) {
+    detail += '（临时凭据已过期或鉴权失败超限，请重新登录该账号）'
+  }
   return detail.length > 0 ? `HTTP ${status}：${detail}` : `HTTP ${status}`
 }
 

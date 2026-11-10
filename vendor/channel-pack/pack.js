@@ -43368,7 +43368,8 @@ async function requestToken(body, keyPair, fetcher = fetch) {
   if (!response.ok || !data?.credentials) {
     const message2 = `CodeArts token request failed: ${response.status}${data ? ` ${JSON.stringify(data)}` : ""}`;
     const errorCode = String(data?.error_code ?? "");
-    if (data?.error === "invalid_grant" || errorCode.includes("ExpiredRefreshToken")) {
+    const errorMsg = String(data?.error_msg ?? "");
+    if (data?.error === "invalid_grant" || errorCode.includes("ExpiredRefreshToken") || errorCode === "STS5.1806" || errorMsg.includes("refresh token has been used") || errorMsg.includes("invalid refresh token")) {
       throw new RefreshTokenExpiredError(message2);
     }
     throw new Error(message2);
@@ -55934,6 +55935,9 @@ function describeHttpFailure(status, text) {
   } catch {
     detail = text.trim().slice(0, 200);
   }
+  if (detail.includes("APIG.0301") || detail.includes("AK access failed") || detail.includes("verify ak sk signature fail")) {
+    detail += "\uFF08\u4E34\u65F6\u51ED\u636E\u5DF2\u8FC7\u671F\u6216\u9274\u6743\u5931\u8D25\u8D85\u9650\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u8BE5\u8D26\u53F7\uFF09";
+  }
   return detail.length > 0 ? `HTTP ${status}\uFF1A${detail}` : `HTTP ${status}`;
 }
 function readBool(source, key) {
@@ -60603,7 +60607,7 @@ async function collectCreditBalances(accounts, product, deps) {
       } else {
         const credential = JSON.parse(resolved.value);
         if (fetchDetailed !== void 0) {
-          const detailed = await fetchDetailed(credential, product);
+          const detailed = await fetchDetailed(credential, product, entry);
           balance = detailed.balance;
           error = detailed.error;
           extra = detailed.extra;
@@ -61993,10 +61997,36 @@ function registerChannelPackEndpoints(ctx, pool, lobsterai, qoder, qoderCn, trae
         const req = payload;
         const accounts = await pool.listAccounts(req.provider);
         if (req.provider === "codearts") {
+          const codeartsInstance = config.codearts ?? new CodeArtsAuth(ctx);
           const values = await collectCreditBalances(accounts, void 0, {
             resolve: (ref) => ctx.credentials.resolve(ref),
-            fetchBalanceDetailed: async (credential) => {
-              const result = await fetchCodeArtsAccountInfoDetailed(credential, codeartsFetcher);
+            fetchBalanceDetailed: async (credential, _product, entry) => {
+              let currentCred = credential;
+              const expiresMs = currentCred.expires_at ? Date.parse(currentCred.expires_at) : NaN;
+              if (Number.isFinite(expiresMs) && expiresMs - Date.now() <= 0 && entry?.credentialRef) {
+                try {
+                  await codeartsInstance.refreshAccountCredential(entry.credentialRef, pool, entry.id);
+                  const updated = await ctx.credentials.resolve(credentialRef13(entry.credentialRef));
+                  if (updated?.value) currentCred = JSON.parse(updated.value);
+                } catch (e) {
+                  const msg = e instanceof Error ? e.message : String(e);
+                  if (msg.includes("refresh token") || msg.includes("\u91CD\u65B0\u767B\u5F55") || msg.includes("STS5.1806")) {
+                    return { balance: null, error: "\u4E34\u65F6\u51ED\u636E\u5DF2\u8FC7\u671F\u4E14\u65E0\u6CD5\u81EA\u52A8\u7EED\u671F\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u8BE5\u8D26\u53F7" };
+                  }
+                }
+              }
+              let result = await fetchCodeArtsAccountInfoDetailed(currentCred, codeartsFetcher);
+              if (!result.ok && result.code === 401 && entry?.credentialRef) {
+                try {
+                  await codeartsInstance.refreshAccountCredential(entry.credentialRef, pool, entry.id);
+                  const updated = await ctx.credentials.resolve(credentialRef13(entry.credentialRef));
+                  if (updated?.value) {
+                    currentCred = JSON.parse(updated.value);
+                    result = await fetchCodeArtsAccountInfoDetailed(currentCred, codeartsFetcher);
+                  }
+                } catch {
+                }
+              }
               if (!result.ok) return { balance: null, error: `\u8D26\u6237\u4FE1\u606F\u67E5\u8BE2\u5931\u8D25\uFF1A${result.message}` };
               const info = result.info;
               if (!info.isCreditPackage) {
