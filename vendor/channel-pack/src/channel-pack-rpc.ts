@@ -501,6 +501,7 @@ export interface CreditsEndpointDeps<
   fetchBalanceDetailed?: (
     credential: TCredential,
     product: TProduct,
+    entry?: ProviderAccountEntry,
   ) => Promise<{ balance: CreditBalance | null; error?: string; extra?: RpcCreditsBalanceExtra }>
   /** 单账号异常时的告警出口（不参与控制流）。 */
   warn?: (message: string) => void
@@ -644,7 +645,7 @@ export async function collectCreditBalances<TCredential = unknown, TProduct = un
         const credential = JSON.parse(resolved.value) as TCredential
         if (fetchDetailed !== undefined) {
           // 带原因的查询：实现自己决定「非积分账户」等业务状态的文案。
-          const detailed = await fetchDetailed(credential, product)
+          const detailed = await fetchDetailed(credential, product, entry)
           balance = detailed.balance
           error = detailed.error
           extra = detailed.extra
@@ -2790,10 +2791,37 @@ function registerChannelPackEndpoints(
         const req = payload as RpcCreditsBalancesRequest
         const accounts = await pool.listAccounts(req.provider)
         if (req.provider === 'codearts') {
+          const codeartsInstance = config.codearts ?? new CodeArtsAuth(ctx)
           const values = await collectCreditBalances<CodeArtsCredential, undefined>(accounts, undefined, {
             resolve: (ref) => ctx.credentials.resolve(ref),
-            fetchBalanceDetailed: async (credential) => {
-              const result = await fetchCodeArtsAccountInfoDetailed(credential, codeartsFetcher)
+            fetchBalanceDetailed: async (credential, _product, entry) => {
+              let currentCred = credential
+              const expiresMs = currentCred.expires_at ? Date.parse(currentCred.expires_at) : NaN
+              // 如果凭据已进入过期窗口，查余额前先尝试静默续期一次，避免向 APIG 发送无效 AK
+              if (Number.isFinite(expiresMs) && expiresMs - Date.now() <= 0 && entry?.credentialRef) {
+                try {
+                  await codeartsInstance.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+                  const updated = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+                  if (updated?.value) currentCred = JSON.parse(updated.value) as CodeArtsCredential
+                } catch (e) {
+                  const msg = e instanceof Error ? e.message : String(e)
+                  if (msg.includes('refresh token') || msg.includes('重新登录') || msg.includes('STS5.1806')) {
+                    return { balance: null, error: '临时凭据已过期且无法自动续期，请重新登录该账号' }
+                  }
+                }
+              }
+              let result = await fetchCodeArtsAccountInfoDetailed(currentCred, codeartsFetcher)
+              // 若首轮遇到 401 鉴权失败，尝试续期重试一次
+              if (!result.ok && result.code === 401 && entry?.credentialRef) {
+                try {
+                  await codeartsInstance.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+                  const updated = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+                  if (updated?.value) {
+                    currentCred = JSON.parse(updated.value) as CodeArtsCredential
+                    result = await fetchCodeArtsAccountInfoDetailed(currentCred, codeartsFetcher)
+                  }
+                } catch {}
+              }
               if (!result.ok) return { balance: null, error: `账户信息查询失败：${result.message}` }
               const info = result.info
               if (!info.isCreditPackage) {

@@ -132,9 +132,13 @@ export async function requestToken(
     // 而把它当普通失败的代价只是 10 分钟后再试一次一个 HTTP 请求。
     // 两相对比，这里选择后者。
     const errorCode = String(data?.error_code ?? '')
+    const errorMsg = String(data?.error_msg ?? '')
     if (
       data?.error === 'invalid_grant'
       || errorCode.includes('ExpiredRefreshToken')
+      || errorCode === 'STS5.1806'
+      || errorMsg.includes('refresh token has been used')
+      || errorMsg.includes('invalid refresh token')
     ) {
       throw new RefreshTokenExpiredError(message)
     }
