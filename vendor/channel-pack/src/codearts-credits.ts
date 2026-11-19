@@ -541,21 +541,20 @@ export function findDailyCheckinActivity(
 }
 
 /**
- * 执行每日签到领取（完整流程）。
+ * 执行 CodeArts 活动积分领取（完整流程）。
  *
- * 步骤与判定顺序（每一步都对应一个**对用户含义不同**的结果）：
- *
+ * 现已支持全量活动自动扫描与聚合领取：
  * 1. 查账户类型 —— 查询失败 → `failed`；非积分账户 → `inactive`
  *    （活动范围明确限定「已升级到积分计费模式的用户」，Token 账户不该被
  *    报成「领取失败」）；
- * 2. 查活动列表 —— 查询失败 → `failed`；无 `USER_LOGIN` 活动 → `inactive`；
- * 3. 活动不可领取且状态属已领取态 → `already-claimed`；其余不可领取 → `inactive`；
- * 4. `POST /v1/ops/claim` —— 失败 → `failed`；
- * 5. 响应 `id !== null` 时补 `POST /v1/ops/confirm`（漏掉会让积分停在待确认）；
- * 6. 成功 → `claimed`。
- *
- * 注意第 3 步是**唯一的幂等保护**：本协议没有幂等键，也没有服务端
- * 「今天已签到」业务码可依赖，因此预检不能省。
+ * 2. 查活动列表 —— 查询失败 → `failed`；无活动列表 → `inactive`；
+ * 3. 扫描所有 `claimable: true` 且非已领取态（`!CLAIMED_STATUSES.includes(status)`）的活动；
+ * 4. 若无待领活动：检查是否存在已领取的签到活动，返回 `already-claimed` 或 `inactive`；
+ * 5. 循环对每个待领活动执行：
+ *    - `POST /v1/ops/claim` { campaignId, channel: 'IDE' }
+ *    - 响应 `id !== null` 时补 `POST /v1/ops/confirm` { campaignId }
+ *    - 累计获取的积分与活动标题
+ * 6. 只要有任意活动领取成功即返回 `claimed`，并带上多活动明细（`delayedMessage`）。
  */
 export async function claimCodeArtsDailyCheckin(
   credential: CodeArtsCredential,
@@ -579,62 +578,95 @@ export async function claimCodeArtsDailyCheckin(
   if (!activitiesResult.ok) {
     return { kind: 'failed', code: -1, message: `活动列表查询失败：${activitiesResult.message}` }
   }
-  const activity = findDailyCheckinActivity(activitiesResult.activities)
-  if (activity === undefined) {
-    return { kind: 'inactive', message: '未找到每日签到活动' }
-  }
-  if (!activity.claimable) {
-    return CLAIMED_STATUSES.includes(activity.status)
-      ? { kind: 'already-claimed', message: '今天已领取' }
-      : { kind: 'inactive', message: `当前不可领取（status=${activity.status}）` }
-  }
-  if (activity.campaignId.length === 0) {
-    return { kind: 'failed', code: -1, message: '活动缺少 campaignId，无法领取' }
+
+  const activities = activitiesResult.activities
+  if (!activities || activities.length === 0) {
+    return { kind: 'inactive', message: '未找到有效活动' }
   }
 
-  const claimResult = await signedSnapRequest(
-    'POST',
-    `${CODEARTS_SNAP_ENGINE_URL}${CODEARTS_OPS_CLAIM_PATH}`,
-    credential,
-    JSON.stringify({ campaignId: activity.campaignId, channel: CODEARTS_OPS_CHANNEL }),
-    fetcher,
+  // 筛选出所有当前可领取的活动（每日签到、新人礼、限时活动等）
+  const claimableList = activities.filter(
+    (act) => act.claimable && !CLAIMED_STATUSES.includes(act.status) && act.campaignId.length > 0,
   )
-  if (!claimResult.ok) {
-    return { kind: 'failed', code: claimResult.code, message: claimResult.message }
+
+  if (claimableList.length === 0) {
+    const claimedAct = activities.find(
+      (act) => act.type === CODEARTS_DAILY_LOGIN_TYPE && CLAIMED_STATUSES.includes(act.status),
+    ) || activities.find((act) => CLAIMED_STATUSES.includes(act.status))
+
+    return claimedAct !== undefined
+      ? { kind: 'already-claimed', message: '今天已领取' }
+      : { kind: 'inactive', message: '当前无可领取活动' }
   }
 
-  // 服务端要求确认时才补 confirm：IDE 的判据是 `benefit.id !== null`。
-  // confirm 失败**不**把整体判为失败 —— 积分已进入待确认态，报 failed 会让
-  // 用户以为没领到而重复点击；这里如实返回 claimed，把确认异常留在日志层。
-  const benefitId = claimResult.data.id
-  if (benefitId !== null && benefitId !== undefined) {
-    await signedSnapRequest(
+  let totalCredit = 0
+  const details: string[] = []
+  const failures: string[] = []
+  let successes = 0
+
+  for (const act of claimableList) {
+    const claimResult = await signedSnapRequest(
       'POST',
-      `${CODEARTS_SNAP_ENGINE_URL}${CODEARTS_OPS_CONFIRM_PATH}`,
+      `${CODEARTS_SNAP_ENGINE_URL}${CODEARTS_OPS_CLAIM_PATH}`,
       credential,
-      JSON.stringify({ campaignId: activity.campaignId }),
+      JSON.stringify({ campaignId: act.campaignId, channel: CODEARTS_OPS_CHANNEL }),
       fetcher,
     )
+
+    if (!claimResult.ok) {
+      failures.push(`${act.title || act.type}（${claimResult.message}）`)
+      continue
+    }
+
+    // 服务端要求确认时补 confirm：IDE 的判据是 `benefit.id !== null`
+    const benefitId = claimResult.data.id
+    if (benefitId !== null && benefitId !== undefined) {
+      await signedSnapRequest(
+        'POST',
+        `${CODEARTS_SNAP_ENGINE_URL}${CODEARTS_OPS_CONFIRM_PATH}`,
+        credential,
+        JSON.stringify({ campaignId: act.campaignId }),
+        fetcher,
+      )
+    }
+
+    const claimCredit = readNumber(claimResult.data, 'benefitAmount')
+      || readNumber(claimResult.data, 'credit')
+      || readNumber(claimResult.data, 'credits')
+      || readNumber(claimResult.data, 'creditAmount')
+      || readNumber(claimResult.data, 'amount')
+    const credit = claimCredit > 0 ? claimCredit : act.amount
+    totalCredit += credit
+    successes++
+
+    const title = act.title || (act.type === CODEARTS_DAILY_LOGIN_TYPE ? '每日登录' : act.type)
+    details.push(`${title}+${credit}积分`)
   }
 
-  // 积分取多级回退：领取响应 → 活动条目。两处都没有时如实记 0，
-  // 不臆造「1000」——文档里的 1000 是活动规则，不是本次发放的实测值。
-  //
-  // `benefitAmount` 排在首位：活动列表用的就是这个字段名（实测 1000），
-  // 领取响应大概率同源；其余候选名保留作兼容。
-  const claimCredit = readNumber(claimResult.data, 'benefitAmount')
-    || readNumber(claimResult.data, 'credit')
-    || readNumber(claimResult.data, 'credits')
-    || readNumber(claimResult.data, 'creditAmount')
-    || readNumber(claimResult.data, 'amount')
-  return {
-    kind: 'claimed',
-    credit: claimCredit > 0 ? claimCredit : activity.amount,
+  if (successes > 0) {
+    const failSummary = failures.length > 0 ? `（部分失败：${failures.join('，')}）` : ''
+    const delayedMessage = details.length > 1 || failures.length > 0
+      ? `已领取：${details.join('；')}${failSummary}`
+      : undefined
 
-    streakDays: 0,
-    isStreakDay: false,
+    return {
+      kind: 'claimed',
+      credit: totalCredit,
+      streakDays: 0,
+      isStreakDay: false,
+      ...(delayedMessage ? { delayedMessage } : {}),
+    }
+  }
+
+  return {
+    kind: 'failed',
+    code: -1,
+    message: `活动领取失败：${failures.join('；')}`,
   }
 }
+
+/** 别名导出，直观体现支持多活动领取。 */
+export const claimCodeArtsAllActivities = claimCodeArtsDailyCheckin
 
 /**
  * 把额度规整为两位小数。

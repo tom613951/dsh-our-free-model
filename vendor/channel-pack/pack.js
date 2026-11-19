@@ -56106,9 +56106,6 @@ async function fetchCodeArtsOpsActivitiesDetailed(credential, fetcher = directFe
     activities: items.filter((item) => typeof item === "object" && item !== null && !Array.isArray(item)).map(parseActivity)
   };
 }
-function findDailyCheckinActivity(activities) {
-  return activities.find((activity) => activity.type === CODEARTS_DAILY_LOGIN_TYPE);
-}
 async function claimCodeArtsDailyCheckin(credential, fetcher = directFetch) {
   const infoResult = await fetchCodeArtsAccountInfoDetailed(credential, fetcher);
   if (!infoResult.ok) {
@@ -56125,42 +56122,67 @@ async function claimCodeArtsDailyCheckin(credential, fetcher = directFetch) {
   if (!activitiesResult.ok) {
     return { kind: "failed", code: -1, message: `\u6D3B\u52A8\u5217\u8868\u67E5\u8BE2\u5931\u8D25\uFF1A${activitiesResult.message}` };
   }
-  const activity = findDailyCheckinActivity(activitiesResult.activities);
-  if (activity === void 0) {
-    return { kind: "inactive", message: "\u672A\u627E\u5230\u6BCF\u65E5\u7B7E\u5230\u6D3B\u52A8" };
+  const activities = activitiesResult.activities;
+  if (!activities || activities.length === 0) {
+    return { kind: "inactive", message: "\u672A\u627E\u5230\u6709\u6548\u6D3B\u52A8" };
   }
-  if (!activity.claimable) {
-    return CLAIMED_STATUSES.includes(activity.status) ? { kind: "already-claimed", message: "\u4ECA\u5929\u5DF2\u9886\u53D6" } : { kind: "inactive", message: `\u5F53\u524D\u4E0D\u53EF\u9886\u53D6\uFF08status=${activity.status}\uFF09` };
-  }
-  if (activity.campaignId.length === 0) {
-    return { kind: "failed", code: -1, message: "\u6D3B\u52A8\u7F3A\u5C11 campaignId\uFF0C\u65E0\u6CD5\u9886\u53D6" };
-  }
-  const claimResult = await signedSnapRequest(
-    "POST",
-    `${CODEARTS_SNAP_ENGINE_URL}${CODEARTS_OPS_CLAIM_PATH}`,
-    credential,
-    JSON.stringify({ campaignId: activity.campaignId, channel: CODEARTS_OPS_CHANNEL }),
-    fetcher
+  const claimableList = activities.filter(
+    (act) => act.claimable && !CLAIMED_STATUSES.includes(act.status) && act.campaignId.length > 0
   );
-  if (!claimResult.ok) {
-    return { kind: "failed", code: claimResult.code, message: claimResult.message };
+  if (claimableList.length === 0) {
+    const claimedAct = activities.find(
+      (act) => act.type === CODEARTS_DAILY_LOGIN_TYPE && CLAIMED_STATUSES.includes(act.status)
+    ) || activities.find((act) => CLAIMED_STATUSES.includes(act.status));
+    return claimedAct !== void 0 ? { kind: "already-claimed", message: "\u4ECA\u5929\u5DF2\u9886\u53D6" } : { kind: "inactive", message: "\u5F53\u524D\u65E0\u53EF\u9886\u53D6\u6D3B\u52A8" };
   }
-  const benefitId = claimResult.data.id;
-  if (benefitId !== null && benefitId !== void 0) {
-    await signedSnapRequest(
+  let totalCredit = 0;
+  const details = [];
+  const failures = [];
+  let successes = 0;
+  for (const act of claimableList) {
+    const claimResult = await signedSnapRequest(
       "POST",
-      `${CODEARTS_SNAP_ENGINE_URL}${CODEARTS_OPS_CONFIRM_PATH}`,
+      `${CODEARTS_SNAP_ENGINE_URL}${CODEARTS_OPS_CLAIM_PATH}`,
       credential,
-      JSON.stringify({ campaignId: activity.campaignId }),
+      JSON.stringify({ campaignId: act.campaignId, channel: CODEARTS_OPS_CHANNEL }),
       fetcher
     );
+    if (!claimResult.ok) {
+      failures.push(`${act.title || act.type}\uFF08${claimResult.message}\uFF09`);
+      continue;
+    }
+    const benefitId = claimResult.data.id;
+    if (benefitId !== null && benefitId !== void 0) {
+      await signedSnapRequest(
+        "POST",
+        `${CODEARTS_SNAP_ENGINE_URL}${CODEARTS_OPS_CONFIRM_PATH}`,
+        credential,
+        JSON.stringify({ campaignId: act.campaignId }),
+        fetcher
+      );
+    }
+    const claimCredit = readNumber3(claimResult.data, "benefitAmount") || readNumber3(claimResult.data, "credit") || readNumber3(claimResult.data, "credits") || readNumber3(claimResult.data, "creditAmount") || readNumber3(claimResult.data, "amount");
+    const credit = claimCredit > 0 ? claimCredit : act.amount;
+    totalCredit += credit;
+    successes++;
+    const title = act.title || (act.type === CODEARTS_DAILY_LOGIN_TYPE ? "\u6BCF\u65E5\u767B\u5F55" : act.type);
+    details.push(`${title}+${credit}\u79EF\u5206`);
   }
-  const claimCredit = readNumber3(claimResult.data, "benefitAmount") || readNumber3(claimResult.data, "credit") || readNumber3(claimResult.data, "credits") || readNumber3(claimResult.data, "creditAmount") || readNumber3(claimResult.data, "amount");
+  if (successes > 0) {
+    const failSummary = failures.length > 0 ? `\uFF08\u90E8\u5206\u5931\u8D25\uFF1A${failures.join("\uFF0C")}\uFF09` : "";
+    const delayedMessage = details.length > 1 || failures.length > 0 ? `\u5DF2\u9886\u53D6\uFF1A${details.join("\uFF1B")}${failSummary}` : void 0;
+    return {
+      kind: "claimed",
+      credit: totalCredit,
+      streakDays: 0,
+      isStreakDay: false,
+      ...delayedMessage ? { delayedMessage } : {}
+    };
+  }
   return {
-    kind: "claimed",
-    credit: claimCredit > 0 ? claimCredit : activity.amount,
-    streakDays: 0,
-    isStreakDay: false
+    kind: "failed",
+    code: -1,
+    message: `\u6D3B\u52A8\u9886\u53D6\u5931\u8D25\uFF1A${failures.join("\uFF1B")}`
   };
 }
 function roundCredits(value) {
