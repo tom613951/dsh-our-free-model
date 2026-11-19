@@ -2781,8 +2781,8 @@ function registerChannelPackEndpoints(
         if (req.provider === CODEBUDDY.id) {
           const value = await collectClaimResults<BuddyCredential, BuddyProduct>(accounts, CODEBUDDY, {
             resolve: (ref) => ctx.credentials.resolve(ref),
-            fetchStatus: (credential, p) => fetchCheckinStatus(credential, p),
             claim: (credential, p) => claimDailyCheckin(credential, p),
+            precheckStatus: false,
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
           return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }

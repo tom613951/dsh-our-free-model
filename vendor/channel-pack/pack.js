@@ -56609,14 +56609,17 @@ function readStringArray(source, key) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 var UNPARSABLE_RESPONSE_MESSAGE2 = "\u8BF7\u6C42\u5931\u8D25\u6216\u54CD\u5E94\u65E0\u6CD5\u89E3\u6790";
-async function postJson2(path2, credential, product, fetcher) {
+async function requestJson2(method, path2, credential, product, payload, fetcher = fetch) {
   try {
-    const response = await fetcher(`${product.endpoint}${path2}`, {
-      method: "POST",
+    const options = {
+      method,
       headers: checkinHeaders(credential, product),
-      body: "{}",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS3)
-    });
+    };
+    if (method === "POST") {
+      options.body = payload !== void 0 ? JSON.stringify(payload) : "{}";
+    }
+    const response = await fetcher(`${product.endpoint}${path2}`, options);
     const text = await response.text();
     let parsed;
     try {
@@ -56631,6 +56634,198 @@ async function postJson2(path2, credential, product, fetcher) {
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
+}
+async function postJson2(path2, credential, product, fetcher = fetch, payload) {
+  return requestJson2("POST", path2, credential, product, payload, fetcher);
+}
+async function getJson2(path2, credential, product, fetcher = fetch) {
+  return requestJson2("GET", path2, credential, product, void 0, fetcher);
+}
+function dig2(obj, key) {
+  if (typeof obj !== "object" || obj === null) return void 0;
+  const record = obj;
+  if (key in record && record[key] !== void 0) return record[key];
+  const data = record.data;
+  if (typeof data === "object" && data !== null && key in data) {
+    return data[key];
+  }
+  return void 0;
+}
+function generateClientToken(prefix = "u") {
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `${prefix}_${ts}_${rand}`;
+}
+async function claimBuddyGrowthCenter(credential, product, fetcher = fetch) {
+  const parts = [];
+  let creditsGained = 0;
+  let successes = 0;
+  let failures = 0;
+  if (product.endpoint.includes("workbuddy.ai")) {
+    return { creditsGained, parts, successes, failures };
+  }
+  const base = "/v2/activity/growth";
+  try {
+    const travelStatus = await getJson2(`${base}/buddy/travel/status`, credential, product, fetcher);
+    if (travelStatus.ok) {
+      const state = dig2(travelStatus.body, "state");
+      const dailyLimit = Boolean(dig2(travelStatus.body, "daily_limit_reached"));
+      let travelState = typeof state === "string" ? state : "idle";
+      if (travelState === "arrived") {
+        const recordId = dig2(travelStatus.body, "record_id");
+        if (recordId !== void 0) {
+          const claimRes = await postJson2(`${base}/buddy/travel/claim`, credential, product, fetcher, { record_id: recordId });
+          if (claimRes.ok) {
+            const rewardCredit = dig2(claimRes.body, "reward_credit");
+            if (rewardCredit !== void 0) {
+              const gained = Number(rewardCredit) || 0;
+              creditsGained += gained;
+              parts.push(`\u9886\u65C5\u884C\u793C\u7269 +${gained} \u79EF\u5206`);
+              successes++;
+              travelState = "idle";
+            }
+          }
+        }
+      }
+      if (travelState === "traveling") {
+        const loc = dig2(travelStatus.body, "location");
+        const locName = loc && typeof loc.name === "string" ? loc.name : "\u65C5\u9014\u4E2D";
+        parts.push(`Buddy \u65C5\u884C\u4E2D\uFF08${locName}\uFF09`);
+      } else if (travelState === "idle" && !dailyLimit) {
+        const cfgRes = await getJson2(`${base}/buddy/travel/config`, credential, product, fetcher);
+        if (cfgRes.ok) {
+          const locs = dig2(cfgRes.body, "locations");
+          if (Array.isArray(locs) && locs.length > 0 && locs[0]?.id !== void 0) {
+            const departRes = await postJson2(`${base}/buddy/travel/depart`, credential, product, fetcher, { location_id: locs[0].id });
+            if (departRes.ok) {
+              const locName = locs[0].name || "\u65B0\u5730\u70B9";
+              parts.push(`\u6D3E Buddy \u53BB ${locName} \u65C5\u884C`);
+              successes++;
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    failures++;
+  }
+  try {
+    const tasksRes = await getJson2(`${base}/tasks`, credential, product, fetcher);
+    if (tasksRes.ok) {
+      const tasks = dig2(tasksRes.body, "tasks") || [];
+      if (Array.isArray(tasks)) {
+        const pendingCodes = tasks.filter((t) => !t.locked && t.accept_status === "not_accepted" && typeof t.task_code === "string").map((t) => t.task_code);
+        if (pendingCodes.length > 0) {
+          for (let i = 0; i < pendingCodes.length; i += 20) {
+            const batch = pendingCodes.slice(i, i + 20);
+            const acceptRes = await postJson2(`${base}/tasks/accept`, credential, product, fetcher, { task_codes: batch });
+            if (acceptRes.ok) {
+              parts.push(`\u81EA\u52A8\u63A5\u53D6 ${batch.length} \u4E2A\u6210\u957F\u4EFB\u52A1`);
+              successes++;
+            }
+          }
+        }
+        const completedTasks = tasks.filter((t) => !t.locked && t.accept_status === "completed" && typeof t.task_code === "string");
+        for (const t of completedTasks) {
+          const code = t.task_code;
+          const title = typeof t.title === "string" && t.title.length > 0 ? t.title : code;
+          const claimTaskRes = await postJson2(`${base}/tasks/${encodeURIComponent(code)}/claim`, credential, product, fetcher, {});
+          if (claimTaskRes.ok && !dig2(claimTaskRes.body, "already_claimed")) {
+            const rc = Number(dig2(claimTaskRes.body, "credit") ?? t.reward_credit ?? 0);
+            creditsGained += rc;
+            parts.push(`\u9886\u4EFB\u52A1\u5956\u300C${title}\u300D+${rc} \u79EF\u5206`);
+            successes++;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    failures++;
+  }
+  try {
+    const streakRes = await getJson2(`${base}/streak`, credential, product, fetcher);
+    if (streakRes.ok) {
+      const cardsObj = dig2(streakRes.body, "makeup_cards");
+      const cards = typeof cardsObj === "object" && cardsObj !== null ? Number(cardsObj.balance || 0) : Number(cardsObj || 0);
+      if (cards > 0) {
+        const heatmapRes = await getJson2(`${base}/heatmap`, credential, product, fetcher);
+        if (heatmapRes.ok) {
+          const todayObj = dig2(heatmapRes.body, "today");
+          const todayStr = typeof todayObj?.date === "string" ? todayObj.date : "";
+          const cells = dig2(heatmapRes.body, "cells");
+          const streakObj = dig2(streakRes.body, "streak");
+          const madeUp = new Set(Array.isArray(streakObj?.makeup_dates) ? streakObj.makeup_dates : []);
+          if (todayStr && Array.isArray(cells)) {
+            const monthStart = todayStr.slice(0, 7) + "-01";
+            const candidates = cells.filter((c) => {
+              const d = typeof c.date === "string" ? c.date : "";
+              const score = Number(c.score ?? 0);
+              return d >= monthStart && d < todayStr && score === 0 && !madeUp.has(d);
+            }).map((c) => c.date).sort().reverse();
+            for (const targetDate of candidates.slice(0, Math.min(cards, 3))) {
+              const useRes = await postJson2(`${base}/makeup-cards/use`, credential, product, fetcher, { target_date: targetDate });
+              if (useRes.ok && (useRes.body.code === 0 || useRes.body.code === void 0)) {
+                parts.push(`\u8865\u767B ${targetDate}`);
+                successes++;
+              } else {
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    failures++;
+  }
+  try {
+    const redeemRes = await getJson2(`${base}/redeem/summary`, credential, product, fetcher);
+    if (redeemRes.ok) {
+      const tiers = [
+        { tier: "7d", key: "starter_status", label: "7\u5929\u8FDE\u767B" },
+        { tier: "14d", key: "advanced_status", label: "14\u5929\u8FDE\u767B" },
+        { tier: "28d", key: "legendary_status", label: "28\u5929\u8FDE\u767B" }
+      ];
+      for (const { tier, key, label } of tiers) {
+        const status = dig2(redeemRes.body, key);
+        if (typeof status === "string" && status !== "claimed" && status !== "locked") {
+          const doRedeem = await postJson2(`${base}/redeem`, credential, product, fetcher, {
+            tier,
+            client_token: generateClientToken()
+          });
+          if (doRedeem.ok && (doRedeem.body.code === 0 || doRedeem.body.code === void 0)) {
+            const granted = Number(dig2(doRedeem.body, "credit_granted") || 0);
+            creditsGained += granted;
+            parts.push(`\u8FDE\u767B\u5151\u6362\u300C${label}\u300D+${granted} \u79EF\u5206`);
+            successes++;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    failures++;
+  }
+  try {
+    const lotRes = await getJson2(`${base}/lottery/chances`, credential, product, fetcher);
+    if (lotRes.ok) {
+      const chances = Number(dig2(lotRes.body, "balance") || 0);
+      if (chances > 0) {
+        const drawRes = await postJson2(`${base}/lottery/draw`, credential, product, fetcher, {
+          client_token: generateClientToken()
+        });
+        if (drawRes.ok && (drawRes.body.code === 0 || drawRes.body.code === void 0)) {
+          const prizeName = String(dig2(drawRes.body, "prize_name") || dig2(drawRes.body, "prize") || "\u76F2\u76D2\u5956\u54C1");
+          const pCredit = Number(dig2(drawRes.body, "reward_credit") || dig2(drawRes.body, "credit") || 0);
+          creditsGained += pCredit;
+          parts.push(`\u5F00\u76F2\u76D2\u83B7\u5F97\u300C${prizeName}\u300D${pCredit > 0 ? `+${pCredit}\u79EF\u5206` : ""}`);
+          successes++;
+        }
+      }
+    }
+  } catch (e) {
+    failures++;
+  }
+  return { creditsGained, parts, successes, failures };
 }
 function describeNonJsonResponse(status, text) {
   if (status === 401 || status === 403) {
@@ -56669,13 +56864,53 @@ async function claimDailyCheckin(credential, product, fetcher = fetch) {
   const body = result.body;
   const code = typeof body.code === "number" ? body.code : -1;
   const message2 = readString4(body, "msg");
+  if (code === 401 || code === 403) {
+    return { kind: "failed", code, message: message2.length > 0 ? message2 : "\u51ED\u636E\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55" };
+  }
+  const growth = await claimBuddyGrowthCenter(credential, product, fetcher);
+  const growthSummary = growth.parts.join("\uFF1B");
   if (code === CODE_ALREADY_CLAIMED || code === CODE_ALREADY_CLAIMED_ALT) {
-    return { kind: "already-claimed", message: message2.length > 0 ? message2 : "\u4ECA\u5929\u5DF2\u7B7E\u5230" };
+    if (growth.creditsGained > 0) {
+      return {
+        kind: "claimed",
+        credit: growth.creditsGained,
+        streakDays: 0,
+        isStreakDay: false,
+        delayedMessage: `\u4ECA\u65E5\u7B7E\u5230\u5DF2\u5B8C\u6210\uFF1B\u6210\u957F\u4E2D\u5FC3 +${growth.creditsGained} \u79EF\u5206\uFF08${growthSummary}\uFF09`
+      };
+    }
+    const baseMsg = message2.length > 0 ? message2 : "\u4ECA\u5929\u5DF2\u7B7E\u5230";
+    return {
+      kind: "already-claimed",
+      message: growthSummary.length > 0 ? `${baseMsg}\uFF08${growthSummary}\uFF09` : baseMsg
+    };
   }
   if (code === CODE_NO_QUALIFICATION || code === CODE_ACTIVITY_ENDED) {
-    return { kind: "inactive", message: message2.length > 0 ? message2 : "\u5F53\u524D\u65E0\u9886\u53D6\u8D44\u683C" };
+    if (growth.creditsGained > 0) {
+      return {
+        kind: "claimed",
+        credit: growth.creditsGained,
+        streakDays: 0,
+        isStreakDay: false,
+        delayedMessage: `\u7B7E\u5230\u6D3B\u52A8\u672A\u5F00\u542F\uFF1B\u6210\u957F\u4E2D\u5FC3 +${growth.creditsGained} \u79EF\u5206\uFF08${growthSummary}\uFF09`
+      };
+    }
+    const baseMsg = message2.length > 0 ? message2 : "\u5F53\u524D\u65E0\u9886\u53D6\u8D44\u683C";
+    return {
+      kind: "inactive",
+      message: growthSummary.length > 0 ? `${baseMsg}\uFF08${growthSummary}\uFF09` : baseMsg
+    };
   }
   if (code !== 0) {
+    if (growth.creditsGained > 0) {
+      return {
+        kind: "claimed",
+        credit: growth.creditsGained,
+        streakDays: 0,
+        isStreakDay: false,
+        delayedMessage: `\u7B7E\u5230\u5F02\u5E38\uFF08${message2}\uFF09\uFF1B\u6210\u957F\u4E2D\u5FC3 +${growth.creditsGained} \u79EF\u5206\uFF08${growthSummary}\uFF09`
+      };
+    }
     return { kind: "failed", code, message: message2.length > 0 ? message2 : "\u9886\u53D6\u5931\u8D25" };
   }
   const data = body.data;
@@ -56684,12 +56919,18 @@ async function claimDailyCheckin(credential, product, fetcher = fetch) {
   }
   const record = data;
   const delayed = readString4(record, "message");
+  const checkinCredit = readNumber4(record, "credit");
+  const totalCredit = checkinCredit + growth.creditsGained;
+  const details = [
+    delayed.length > 0 ? delayed : "",
+    growthSummary.length > 0 ? `\u6210\u957F\u4E2D\u5FC3\uFF1A${growthSummary}` : ""
+  ].filter(Boolean);
   return {
     kind: "claimed",
-    credit: readNumber4(record, "credit"),
+    credit: totalCredit,
     streakDays: readNumber4(record, "streak_days"),
     isStreakDay: readBool2(record, "is_streak_day"),
-    ...delayed.length > 0 ? { delayedMessage: delayed } : {}
+    ...details.length > 0 ? { delayedMessage: details.join("\uFF1B") } : {}
   };
 }
 function readPreciseNumber(source, baseKey) {
@@ -58100,7 +58341,7 @@ var LOBSTERAI_SLOT_PLACEMENT = "desktop_sidebar";
 var LOBSTERAI_SLOT_CONTAINER_API_VERSION = "2";
 var LOBSTERAI_SLOT_PLATFORM = "win32";
 var UNPARSABLE_RESPONSE_MESSAGE3 = "\u8BF7\u6C42\u5931\u8D25\u6216\u54CD\u5E94\u65E0\u6CD5\u89E3\u6790";
-async function requestJson2(url, credential, product, fetcher, init = { method: "GET" }) {
+async function requestJson3(url, credential, product, fetcher, init = { method: "GET" }) {
   try {
     const response = await fetcher(url, {
       method: init.method,
@@ -58151,7 +58392,7 @@ async function fetchLobsteraiActivitySlot(credential, product, clientVersion, fe
     containerApiVersion: LOBSTERAI_SLOT_CONTAINER_API_VERSION,
     platform: LOBSTERAI_SLOT_PLATFORM
   });
-  const result = await requestJson2(
+  const result = await requestJson3(
     `${product.apiBase}${LOBSTERAI_ACTIVITY_SLOT_PATH}?${query.toString()}`,
     credential,
     product,
@@ -58171,7 +58412,7 @@ async function fetchLobsteraiActivitySlot(credential, product, clientVersion, fe
 async function fetchLobsteraiActivityContext(credential, product, slot2, fetcher = fetch) {
   const query = new URLSearchParams({ configRevision: String(slot2.configRevision) });
   const url = `${product.apiBase}${LOBSTERAI_ACTIVITY_CONTEXT_PATH}/${encodeURIComponent(slot2.activityCode)}/context?${query.toString()}`;
-  const result = await requestJson2(url, credential, product, fetcher);
+  const result = await requestJson3(url, credential, product, fetcher);
   if (!result.ok) return null;
   const envelope = parseLobsteraiEnvelope(result.body);
   if (!envelope.ok) return null;
@@ -58200,7 +58441,7 @@ async function claimLobsteraiDailyCheckin(credential, product, clientVersion, fe
     return { kind: "inactive", message: "\u5F53\u524D\u4E0D\u53EF\u7B7E\u5230" };
   }
   const url = `${product.apiBase}${LOBSTERAI_ACTIVITY_CONTEXT_PATH}/${encodeURIComponent(slot2.activityCode)}/actions/check_in`;
-  const result = await requestJson2(url, credential, product, fetcher, {
+  const result = await requestJson3(url, credential, product, fetcher, {
     method: "POST",
     body: JSON.stringify({
       configRevision: slot2.configRevision,
@@ -58228,7 +58469,7 @@ async function claimLobsteraiDailyCheckin(credential, product, clientVersion, fe
   };
 }
 async function fetchLobsteraiCreditBalance(credential, product, fetcher = fetch) {
-  const result = await requestJson2(
+  const result = await requestJson3(
     `${product.apiBase}${LOBSTERAI_PROFILE_SUMMARY_PATH}`,
     credential,
     product,
@@ -61980,8 +62221,8 @@ function registerChannelPackEndpoints(ctx, pool, lobsterai, qoder, qoderCn, trae
         if (req.provider === CODEBUDDY.id) {
           const value = await collectClaimResults(accounts, CODEBUDDY, {
             resolve: (ref) => ctx.credentials.resolve(ref),
-            fetchStatus: (credential, p) => fetchCheckinStatus(credential, p),
             claim: (credential, p) => claimDailyCheckin(credential, p),
+            precheckStatus: false,
             warn: (msg) => ctx.logger?.warn?.(msg)
           });
           return { ok: true, value };

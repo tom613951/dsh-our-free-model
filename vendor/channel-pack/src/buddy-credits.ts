@@ -328,7 +328,7 @@ type PostResult =
 const UNPARSABLE_RESPONSE_MESSAGE = '请求失败或响应无法解析'
 
 /**
- * 发起一次签到请求并解析 JSON 响应体。
+ * 发起请求并解析 JSON 响应体。
  * 网络失败或响应无法解析为对象时返回失败原因（由调用方决定如何呈现）。
  *
  * ⚠️ **不要用 `response.json()`**：凭据过期/失效时，腾讯网关返回的是
@@ -337,19 +337,24 @@ const UNPARSABLE_RESPONSE_MESSAGE = '请求失败或响应无法解析'
  * 用户毫无意义，也看不出真正原因是「凭据过期」。故先取文本、再尝试解析，
  * 非 JSON 时带上 HTTP 状态码与响应片段（真实缺陷：用户看到的就是上面那句）。
  */
-async function postJson(
+async function requestJson(
+  method: 'GET' | 'POST',
   path: string,
   credential: BuddyCredential,
   product: BuddyProduct,
-  fetcher: typeof fetch,
+  payload?: unknown,
+  fetcher: typeof fetch = fetch,
 ): Promise<PostResult> {
   try {
-    const response = await fetcher(`${product.endpoint}${path}`, {
-      method: 'POST',
+    const options: RequestInit = {
+      method,
       headers: checkinHeaders(credential, product),
-      body: '{}',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    })
+    }
+    if (method === 'POST') {
+      options.body = payload !== undefined ? JSON.stringify(payload) : '{}'
+    }
+    const response = await fetcher(`${product.endpoint}${path}`, options)
     const text = await response.text()
     let parsed: unknown
     try {
@@ -367,6 +372,265 @@ async function postJson(
     // 保留原始错误消息（含超时/连接被重置等信号），不吞掉诊断信息。
     return { ok: false, message: error instanceof Error ? error.message : String(error) }
   }
+}
+
+async function postJson(
+  path: string,
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  fetcher: typeof fetch = fetch,
+  payload?: unknown,
+): Promise<PostResult> {
+  return requestJson('POST', path, credential, product, payload, fetcher)
+}
+
+async function getJson(
+  path: string,
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<PostResult> {
+  return requestJson('GET', path, credential, product, undefined, fetcher)
+}
+
+/** 从响应对象深度读取字段（兼顾顶层与 data 子对象）。 */
+function dig(obj: unknown, key: string): unknown {
+  if (typeof obj !== 'object' || obj === null) return undefined
+  const record = obj as Record<string, unknown>
+  if (key in record && record[key] !== undefined) return record[key]
+  const data = record.data
+  if (typeof data === 'object' && data !== null && key in (data as Record<string, unknown>)) {
+    return (data as Record<string, unknown>)[key]
+  }
+  return undefined
+}
+
+/** 生成抽奖与连登兑换所需的幂等 client_token。 */
+function generateClientToken(prefix = 'u'): string {
+  const ts = Date.now()
+  const rand = Math.random().toString(36).slice(2, 10)
+  return `${prefix}_${ts}_${rand}`
+}
+
+export interface BuddyGrowthOutcome {
+  creditsGained: number
+  parts: string[]
+  successes: number
+  failures: number
+}
+
+/**
+ * 领取 WorkBuddy 成长中心活动奖励：
+ * 1. 宠物旅行：领取旅行礼物 + 自动派出旅行
+ * 2. 任务中心：未接任务批量接单 + 已完成任务领奖
+ * 3. 补登卡：断登自动补签保连登
+ * 4. 连登阶梯奖励：兑换 7d/14d/28d 阶梯大额积分
+ * 5. 幸运盲盒：自动消耗抽奖机会
+ */
+export async function claimBuddyGrowthCenter(
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<BuddyGrowthOutcome> {
+  const parts: string[] = []
+  let creditsGained = 0
+  let successes = 0
+  let failures = 0
+
+  // 国际版域名（如 workbuddy.ai）无成长中心接口，安全跳过
+  if (product.endpoint.includes('workbuddy.ai')) {
+    return { creditsGained, parts, successes, failures }
+  }
+
+  const base = '/v2/activity/growth'
+
+  // --- 1. Buddy 宠物旅行 ---
+  try {
+    const travelStatus = await getJson(`${base}/buddy/travel/status`, credential, product, fetcher)
+    if (travelStatus.ok) {
+      const state = dig(travelStatus.body, 'state')
+      const dailyLimit = Boolean(dig(travelStatus.body, 'daily_limit_reached'))
+      let travelState = typeof state === 'string' ? state : 'idle'
+
+      if (travelState === 'arrived') {
+        const recordId = dig(travelStatus.body, 'record_id')
+        if (recordId !== undefined) {
+          const claimRes = await postJson(`${base}/buddy/travel/claim`, credential, product, fetcher, { record_id: recordId })
+          if (claimRes.ok) {
+            const rewardCredit = dig(claimRes.body, 'reward_credit')
+            if (rewardCredit !== undefined) {
+              const gained = Number(rewardCredit) || 0
+              creditsGained += gained
+              parts.push(`领旅行礼物 +${gained} 积分`)
+              successes++
+              travelState = 'idle'
+            }
+          }
+        }
+      }
+
+      if (travelState === 'traveling') {
+        const loc = dig(travelStatus.body, 'location') as Record<string, unknown> | undefined
+        const locName = (loc && typeof loc.name === 'string') ? loc.name : '旅途中'
+        parts.push(`Buddy 旅行中（${locName}）`)
+      } else if (travelState === 'idle' && !dailyLimit) {
+        const cfgRes = await getJson(`${base}/buddy/travel/config`, credential, product, fetcher)
+        if (cfgRes.ok) {
+          const locs = dig(cfgRes.body, 'locations') as Array<Record<string, unknown>> | undefined
+          if (Array.isArray(locs) && locs.length > 0 && locs[0]?.id !== undefined) {
+            const departRes = await postJson(`${base}/buddy/travel/depart`, credential, product, fetcher, { location_id: locs[0].id })
+            if (departRes.ok) {
+              const locName = locs[0].name || '新地点'
+              parts.push(`派 Buddy 去 ${locName} 旅行`)
+              successes++
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    failures++
+  }
+
+  // --- 2. 任务中心（Tasks）---
+  try {
+    const tasksRes = await getJson(`${base}/tasks`, credential, product, fetcher)
+    if (tasksRes.ok) {
+      const tasks = (dig(tasksRes.body, 'tasks') || []) as Array<Record<string, unknown>>
+      if (Array.isArray(tasks)) {
+        // 自动接单
+        const pendingCodes = tasks
+          .filter((t) => !t.locked && t.accept_status === 'not_accepted' && typeof t.task_code === 'string')
+          .map((t) => t.task_code as string)
+        if (pendingCodes.length > 0) {
+          for (let i = 0; i < pendingCodes.length; i += 20) {
+            const batch = pendingCodes.slice(i, i + 20)
+            const acceptRes = await postJson(`${base}/tasks/accept`, credential, product, fetcher, { task_codes: batch })
+            if (acceptRes.ok) {
+              parts.push(`自动接取 ${batch.length} 个成长任务`)
+              successes++
+            }
+          }
+        }
+
+        // 任务领奖
+        const completedTasks = tasks.filter((t) => !t.locked && t.accept_status === 'completed' && typeof t.task_code === 'string')
+        for (const t of completedTasks) {
+          const code = t.task_code as string
+          const title = (typeof t.title === 'string' && t.title.length > 0) ? t.title : code
+          const claimTaskRes = await postJson(`${base}/tasks/${encodeURIComponent(code)}/claim`, credential, product, fetcher, {})
+          if (claimTaskRes.ok && !dig(claimTaskRes.body, 'already_claimed')) {
+            const rc = Number(dig(claimTaskRes.body, 'credit') ?? t.reward_credit ?? 0)
+            creditsGained += rc
+            parts.push(`领任务奖「${title}」+${rc} 积分`)
+            successes++
+          }
+        }
+      }
+    }
+  } catch (e) {
+    failures++
+  }
+
+  // --- 3. 补登卡（Streak & Makeup Cards）---
+  try {
+    const streakRes = await getJson(`${base}/streak`, credential, product, fetcher)
+    if (streakRes.ok) {
+      const cardsObj = dig(streakRes.body, 'makeup_cards')
+      const cards = typeof cardsObj === 'object' && cardsObj !== null
+        ? Number((cardsObj as Record<string, unknown>).balance || 0)
+        : Number(cardsObj || 0)
+
+      if (cards > 0) {
+        const heatmapRes = await getJson(`${base}/heatmap`, credential, product, fetcher)
+        if (heatmapRes.ok) {
+          const todayObj = dig(heatmapRes.body, 'today') as Record<string, unknown> | undefined
+          const todayStr = typeof todayObj?.date === 'string' ? todayObj.date : ''
+          const cells = dig(heatmapRes.body, 'cells') as Array<Record<string, unknown>> | undefined
+          const streakObj = dig(streakRes.body, 'streak') as Record<string, unknown> | undefined
+          const madeUp = new Set(Array.isArray(streakObj?.makeup_dates) ? streakObj.makeup_dates : [])
+
+          if (todayStr && Array.isArray(cells)) {
+            const monthStart = todayStr.slice(0, 7) + '-01'
+            const candidates = cells
+              .filter((c) => {
+                const d = typeof c.date === 'string' ? c.date : ''
+                const score = Number(c.score ?? 0)
+                return d >= monthStart && d < todayStr && score === 0 && !madeUp.has(d)
+              })
+              .map((c) => c.date as string)
+              .sort()
+              .reverse()
+
+            for (const targetDate of candidates.slice(0, Math.min(cards, 3))) {
+              const useRes = await postJson(`${base}/makeup-cards/use`, credential, product, fetcher, { target_date: targetDate })
+              if (useRes.ok && (useRes.body.code === 0 || useRes.body.code === undefined)) {
+                parts.push(`补登 ${targetDate}`)
+                successes++
+              } else {
+                break
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    failures++
+  }
+
+  // --- 4. 连登奖励兑换（7d / 14d / 28d）---
+  try {
+    const redeemRes = await getJson(`${base}/redeem/summary`, credential, product, fetcher)
+    if (redeemRes.ok) {
+      const tiers = [
+        { tier: '7d', key: 'starter_status', label: '7天连登' },
+        { tier: '14d', key: 'advanced_status', label: '14天连登' },
+        { tier: '28d', key: 'legendary_status', label: '28天连登' },
+      ]
+      for (const { tier, key, label } of tiers) {
+        const status = dig(redeemRes.body, key)
+        if (typeof status === 'string' && status !== 'claimed' && status !== 'locked') {
+          const doRedeem = await postJson(`${base}/redeem`, credential, product, fetcher, {
+            tier,
+            client_token: generateClientToken(),
+          })
+          if (doRedeem.ok && (doRedeem.body.code === 0 || doRedeem.body.code === undefined)) {
+            const granted = Number(dig(doRedeem.body, 'credit_granted') || 0)
+            creditsGained += granted
+            parts.push(`连登兑换「${label}」+${granted} 积分`)
+            successes++
+          }
+        }
+      }
+    }
+  } catch (e) {
+    failures++
+  }
+
+  // --- 5. 幸运盲盒抽奖 ---
+  try {
+    const lotRes = await getJson(`${base}/lottery/chances`, credential, product, fetcher)
+    if (lotRes.ok) {
+      const chances = Number(dig(lotRes.body, 'balance') || 0)
+      if (chances > 0) {
+        const drawRes = await postJson(`${base}/lottery/draw`, credential, product, fetcher, {
+          client_token: generateClientToken(),
+        })
+        if (drawRes.ok && (drawRes.body.code === 0 || drawRes.body.code === undefined)) {
+          const prizeName = String(dig(drawRes.body, 'prize_name') || dig(drawRes.body, 'prize') || '盲盒奖品')
+          const pCredit = Number(dig(drawRes.body, 'reward_credit') || dig(drawRes.body, 'credit') || 0)
+          creditsGained += pCredit
+          parts.push(`开盲盒获得「${prizeName}」${pCredit > 0 ? `+${pCredit}积分` : ''}`)
+          successes++
+        }
+      }
+    }
+  } catch (e) {
+    failures++
+  }
+
+  return { creditsGained, parts, successes, failures }
 }
 
 /**
@@ -437,27 +701,81 @@ export async function claimDailyCheckin(
   const code = typeof body.code === 'number' ? body.code : -1
   const message = readString(body, 'msg')
 
+  if (code === 401 || code === 403) {
+    return { kind: 'failed', code, message: message.length > 0 ? message : '凭据已失效，请重新登录' }
+  }
+
+  // 执行成长中心（旅行、任务、连登兑换、抽奖等）
+  const growth = await claimBuddyGrowthCenter(credential, product, fetcher)
+  const growthSummary = growth.parts.join('；')
+
   if (code === CODE_ALREADY_CLAIMED || code === CODE_ALREADY_CLAIMED_ALT) {
-    return { kind: 'already-claimed', message: message.length > 0 ? message : '今天已签到' }
+    if (growth.creditsGained > 0) {
+      return {
+        kind: 'claimed',
+        credit: growth.creditsGained,
+        streakDays: 0,
+        isStreakDay: false,
+        delayedMessage: `今日签到已完成；成长中心 +${growth.creditsGained} 积分（${growthSummary}）`,
+      }
+    }
+    const baseMsg = message.length > 0 ? message : '今天已签到'
+    return {
+      kind: 'already-claimed',
+      message: growthSummary.length > 0 ? `${baseMsg}（${growthSummary}）` : baseMsg,
+    }
   }
+
   if (code === CODE_NO_QUALIFICATION || code === CODE_ACTIVITY_ENDED) {
-    return { kind: 'inactive', message: message.length > 0 ? message : '当前无领取资格' }
+    if (growth.creditsGained > 0) {
+      return {
+        kind: 'claimed',
+        credit: growth.creditsGained,
+        streakDays: 0,
+        isStreakDay: false,
+        delayedMessage: `签到活动未开启；成长中心 +${growth.creditsGained} 积分（${growthSummary}）`,
+      }
+    }
+    const baseMsg = message.length > 0 ? message : '当前无领取资格'
+    return {
+      kind: 'inactive',
+      message: growthSummary.length > 0 ? `${baseMsg}（${growthSummary}）` : baseMsg,
+    }
   }
+
   if (code !== 0) {
+    if (growth.creditsGained > 0) {
+      return {
+        kind: 'claimed',
+        credit: growth.creditsGained,
+        streakDays: 0,
+        isStreakDay: false,
+        delayedMessage: `签到异常（${message}）；成长中心 +${growth.creditsGained} 积分（${growthSummary}）`,
+      }
+    }
     return { kind: 'failed', code, message: message.length > 0 ? message : '领取失败' }
   }
+
   const data = body.data
   if (typeof data !== 'object' || data === null) {
     return { kind: 'failed', code, message: '领取响应缺少 data 字段' }
   }
   const record = data as Record<string, unknown>
   const delayed = readString(record, 'message')
+  const checkinCredit = readNumber(record, 'credit')
+  const totalCredit = checkinCredit + growth.creditsGained
+
+  const details = [
+    delayed.length > 0 ? delayed : '',
+    growthSummary.length > 0 ? `成长中心：${growthSummary}` : '',
+  ].filter(Boolean)
+
   return {
     kind: 'claimed',
-    credit: readNumber(record, 'credit'),
+    credit: totalCredit,
     streakDays: readNumber(record, 'streak_days'),
     isStreakDay: readBool(record, 'is_streak_day'),
-    ...delayed.length > 0 ? { delayedMessage: delayed } : {},
+    ...details.length > 0 ? { delayedMessage: details.join('；') } : {},
   }
 }
 
