@@ -27,7 +27,7 @@ import {
   HTTP_HEADER_PRODUCT_CODE,
 } from './buddy.js'
 import type { BuddyCredential } from './buddy.js'
-import type { BuddyProduct } from './product.js'
+import { resolveUserAgent, type BuddyProduct } from './product.js'
 
 /** 签到状态查询端点（权威状态源）。 */
 export const CHECKIN_ACTIVITY_STATUS_PATH = '/v2/billing/meter/checkin-activity-status'
@@ -682,6 +682,82 @@ export async function fetchCheckinStatus(
 }
 
 /**
+ * WorkBuddy 国际版（workbuddy.ai）每日活跃打卡。
+ *
+ * 国际版无每日签到或成长中心 H5 路由，其每日配额机制是：
+ * 通过向对话接口发起轻量免额度心跳，激活服务端当日活跃度判定，触发 Daily Active 配额下发。
+ */
+export async function triggerWorkBuddyIntlDailyActive(
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<ClaimOutcome> {
+  if (!credential.access_token) {
+    return { kind: 'failed', code: 401, message: '凭据缺少 access_token，请重新登录' }
+  }
+
+  const heartbeatHeaders = new Headers()
+  heartbeatHeaders.set('Authorization', `Bearer ${credential.access_token}`)
+  heartbeatHeaders.set('Content-Type', 'application/json')
+  heartbeatHeaders.set('User-Agent', resolveUserAgent(product, 'fast-model'))
+  heartbeatHeaders.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || 'www.workbuddy.ai')
+  heartbeatHeaders.set(HTTP_HEADER_PRODUCT, BUDDY_DEPLOYMENT_TYPE)
+  heartbeatHeaders.set(HTTP_HEADER_PRODUCT_CODE, product.productCode)
+  if (credential.user_id) heartbeatHeaders.set('X-User-Id', credential.user_id)
+  if (credential.enterprise_id) {
+    heartbeatHeaders.set('X-Enterprise-Id', credential.enterprise_id)
+    heartbeatHeaders.set('X-Tenant-Id', credential.enterprise_id)
+  }
+
+  try {
+    const chatUrl = `${product.endpoint}/v2/chat/completions`
+    const chatRes = await fetcher(chatUrl, {
+      method: 'POST',
+      headers: heartbeatHeaders,
+      body: JSON.stringify({
+        model: 'fast-model',
+        messages: [{ role: 'user', content: 'ping' }],
+        stream: false,
+        max_tokens: 1,
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+
+    if (chatRes.status === 401 || chatRes.status === 403) {
+      return { kind: 'failed', code: chatRes.status, message: `凭据已失效（HTTP ${chatRes.status}），请重新登录` }
+    }
+
+    if (!chatRes.ok && chatRes.status !== 400 && chatRes.status !== 429) {
+      return { kind: 'failed', code: chatRes.status, message: `心跳激活失败（HTTP ${chatRes.status}）` }
+    }
+
+    let extraNote = ''
+    try {
+      const notifyRes = await postJson('/v2/billing/meter/get-dosage-notify', credential, product, fetcher)
+      if (notifyRes.ok && notifyRes.body.data) {
+        const notifyData = notifyRes.body.data as Record<string, unknown>
+        const msg = readString(notifyData, 'message') || readString(notifyData, 'msg')
+        if (msg.length > 0) extraNote = `（${msg}）`
+      }
+    } catch {}
+
+    return {
+      kind: 'claimed',
+      credit: 0,
+      streakDays: 0,
+      isStreakDay: false,
+      delayedMessage: `已向国际版发送轻量心跳激活当日活跃配额${extraNote}`,
+    }
+  } catch (error) {
+    return {
+      kind: 'failed',
+      code: -1,
+      message: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+/**
  * 执行每日签到领取。
  *
  * 判定顺序：先看业务码是否属于「已领取 / 无资格 / 活动结束」这些非致命类别，
@@ -693,6 +769,11 @@ export async function claimDailyCheckin(
   product: BuddyProduct,
   fetcher: typeof fetch = fetch,
 ): Promise<ClaimOutcome> {
+  // 国际版（workbuddy.ai）走轻量心跳激活每日活跃
+  if (product.endpoint.includes('workbuddy.ai')) {
+    return triggerWorkBuddyIntlDailyActive(credential, product, fetcher)
+  }
+
   const result = await postJson(DAILY_CHECKIN_PATH, credential, product, fetcher)
   if (!result.ok) {
     return { kind: 'failed', code: -1, message: result.message }

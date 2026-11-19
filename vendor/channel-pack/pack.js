@@ -56878,7 +56878,70 @@ async function fetchCheckinStatus(credential, product, fetcher = fetch) {
     endTime: readString4(record, "end_time")
   };
 }
+async function triggerWorkBuddyIntlDailyActive(credential, product, fetcher = fetch) {
+  if (!credential.access_token) {
+    return { kind: "failed", code: 401, message: "\u51ED\u636E\u7F3A\u5C11 access_token\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55" };
+  }
+  const heartbeatHeaders = new Headers();
+  heartbeatHeaders.set("Authorization", `Bearer ${credential.access_token}`);
+  heartbeatHeaders.set("Content-Type", "application/json");
+  heartbeatHeaders.set("User-Agent", resolveUserAgent(product, "fast-model"));
+  heartbeatHeaders.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || "www.workbuddy.ai");
+  heartbeatHeaders.set(HTTP_HEADER_PRODUCT, BUDDY_DEPLOYMENT_TYPE);
+  heartbeatHeaders.set(HTTP_HEADER_PRODUCT_CODE, product.productCode);
+  if (credential.user_id) heartbeatHeaders.set("X-User-Id", credential.user_id);
+  if (credential.enterprise_id) {
+    heartbeatHeaders.set("X-Enterprise-Id", credential.enterprise_id);
+    heartbeatHeaders.set("X-Tenant-Id", credential.enterprise_id);
+  }
+  try {
+    const chatUrl = `${product.endpoint}/v2/chat/completions`;
+    const chatRes = await fetcher(chatUrl, {
+      method: "POST",
+      headers: heartbeatHeaders,
+      body: JSON.stringify({
+        model: "fast-model",
+        messages: [{ role: "user", content: "ping" }],
+        stream: false,
+        max_tokens: 1
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS3)
+    });
+    if (chatRes.status === 401 || chatRes.status === 403) {
+      return { kind: "failed", code: chatRes.status, message: `\u51ED\u636E\u5DF2\u5931\u6548\uFF08HTTP ${chatRes.status}\uFF09\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55` };
+    }
+    if (!chatRes.ok && chatRes.status !== 400 && chatRes.status !== 429) {
+      return { kind: "failed", code: chatRes.status, message: `\u5FC3\u8DF3\u6FC0\u6D3B\u5931\u8D25\uFF08HTTP ${chatRes.status}\uFF09` };
+    }
+    let extraNote = "";
+    try {
+      const notifyRes = await postJson2("/v2/billing/meter/get-dosage-notify", credential, product, fetcher);
+      if (notifyRes.ok && notifyRes.body.data) {
+        const notifyData = notifyRes.body.data;
+        const msg = readString4(notifyData, "message") || readString4(notifyData, "msg");
+        if (msg.length > 0) extraNote = `\uFF08${msg}\uFF09`;
+      }
+    } catch {
+    }
+    return {
+      kind: "claimed",
+      credit: 0,
+      streakDays: 0,
+      isStreakDay: false,
+      delayedMessage: `\u5DF2\u5411\u56FD\u9645\u7248\u53D1\u9001\u8F7B\u91CF\u5FC3\u8DF3\u6FC0\u6D3B\u5F53\u65E5\u6D3B\u8DC3\u914D\u989D${extraNote}`
+    };
+  } catch (error) {
+    return {
+      kind: "failed",
+      code: -1,
+      message: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
 async function claimDailyCheckin(credential, product, fetcher = fetch) {
+  if (product.endpoint.includes("workbuddy.ai")) {
+    return triggerWorkBuddyIntlDailyActive(credential, product, fetcher);
+  }
   const result = await postJson2(DAILY_CHECKIN_PATH, credential, product, fetcher);
   if (!result.ok) {
     return { kind: "failed", code: -1, message: result.message };
@@ -62232,13 +62295,13 @@ function registerChannelPackEndpoints(ctx, pool, lobsterai, qoder, qoderCn, trae
           return { ok: true, value };
         }
         if (req.provider === WORKBUDDY.id) {
-          return {
-            ok: false,
-            error: {
-              code: "bad-request",
-              message: "WorkBuddy \u56FD\u9645\u7248\u4E0D\u652F\u6301\u6BCF\u65E5\u7B7E\u5230\uFF08\u5176\u540E\u7AEF\u6CA1\u6709\u7B7E\u5230\u63A5\u53E3\uFF09"
-            }
-          };
+          const value = await collectClaimResults(accounts, WORKBUDDY, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            claim: (credential, p) => claimDailyCheckin(credential, p),
+            precheckStatus: false,
+            warn: (msg) => ctx.logger?.warn?.(msg)
+          });
+          return { ok: true, value };
         }
         if (req.provider === CODEBUDDY.id) {
           const value = await collectClaimResults(accounts, CODEBUDDY, {

@@ -2770,13 +2770,13 @@ function registerChannelPackEndpoints(
           return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
         }
         if (req.provider === WORKBUDDY.id) {
-          return {
-            ok: false,
-            error: {
-              code: 'bad-request',
-              message: 'WorkBuddy 国际版不支持每日签到（其后端没有签到接口）',
-            },
-          }
+          const value = await collectClaimResults<BuddyCredential, BuddyProduct>(accounts, WORKBUDDY, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            claim: (credential, p) => claimDailyCheckin(credential, p),
+            precheckStatus: false,
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
         }
         if (req.provider === CODEBUDDY.id) {
           const value = await collectClaimResults<BuddyCredential, BuddyProduct>(accounts, CODEBUDDY, {
