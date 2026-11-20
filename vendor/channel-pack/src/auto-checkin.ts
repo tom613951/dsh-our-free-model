@@ -492,6 +492,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
   const now = deps.now ?? (() => Date.now())
   let doc = deps.store.load()
   let running = false
+  let stopped = false
   /** 在飞去重：`setEnabled(true)` 与启动排定可能同时想跑。 */
   let inflight: Promise<void> | null = null
   let pending: { cancel(): void } | null = null
@@ -527,8 +528,13 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       deps.warn?.(`[channel-pack] 自动签到：读取账号池失败，本次跳过: ${String(error)}`)
       return
     }
+    if (stopped) return
     const channels: Array<{ provider: string; text: string }> = []
     for (const provider of providers) {
+      if (stopped) {
+        deps.warn?.('[channel-pack] 自动签到因宿主关闭中断，未记入今日（下次启动会重试）')
+        return
+      }
       // ⚠️ 排除表先于**任何**上游请求生效（见 isAutoCheckinExcluded 的说明）：
       // zcode 的代价发生在**调用期间**（拉起浏览器产 captcha），事后再判断已经
       // 太晚 —— 必须在调 `claim` 之前就把它摘掉。
@@ -541,10 +547,18 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       try {
         result = await deps.claim(provider)
       } catch (error) {
+        if (stopped) {
+          deps.warn?.('[channel-pack] 自动签到因宿主关闭中断，未记入今日（下次启动会重试）')
+          return
+        }
         totals.errors += 1
         channels.push({ provider, text: '出错' })
         deps.warn?.(`[channel-pack] 自动签到：${provider} 调用异常: ${String(error)}`)
         continue
+      }
+      if (stopped) {
+        deps.warn?.('[channel-pack] 自动签到因宿主关闭中断，未记入今日（下次启动会重试）')
+        return
       }
       if (!result.ok) {
         const message = typeof result.error?.message === 'string' ? result.error.message : ''
@@ -581,6 +595,11 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       channels.push({ provider, text: describeChannel(summary) })
     }
 
+    if (stopped) {
+      deps.warn?.('[channel-pack] 自动签到因宿主关闭中断，未记入今日（下次启动会重试）')
+      return
+    }
+
     if (!shouldMarkToday(totals)) {
       // ⚠️ 刻意**不写** lastDate：让「凭据还没续上 / 网络不通 / 赶在渠道刷新前
       // 跑的那一轮」能在下次启动重试，而不是当天就此放弃（判据见 shouldMarkToday）。
@@ -610,6 +629,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
   }
 
   function runIfDue(): Promise<void> {
+    if (stopped) return Promise.resolve()
     if (inflight !== null) return inflight
     if (!doc.enabled) return Promise.resolve()
     if (doc.lastDate !== '' && doc.lastDate === today()) return Promise.resolve()
@@ -636,6 +656,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       return state()
     },
     start() {
+      stopped = false
       if (pending !== null || tick !== null) return
       const ms = deps.delayMs ?? autoCheckinDelayMs()
       const fire = (): void => {
@@ -676,6 +697,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       return state()
     },
     stop() {
+      stopped = true
       pending?.cancel()
       pending = null
       tick?.cancel()

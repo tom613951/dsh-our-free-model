@@ -2622,7 +2622,21 @@ function registerChannelPackEndpoints(
           // 领取流程自带幂等判据（`alreadyProcessed`），故不做额外预检。
           const values: RpcCreditsClaimAccountResult[] = []
           for (const account of accounts) {
-            const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+            let resolved: Awaited<ReturnType<typeof ctx.credentials.resolve>>
+            try {
+              resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+            } catch (error) {
+              ctx.logger?.warn?.(`[channel-pack] credits.claimAll 账号 ${account.id} 失败: ${String(error)}`)
+              values.push({
+                accountId: account.id, nickname: account.nickname,
+                outcome: {
+                  kind: 'failed',
+                  code: -1,
+                  message: error instanceof Error ? error.message : String(error),
+                },
+              })
+              continue
+            }
             if (!resolved) {
               values.push({
                 accountId: account.id, nickname: account.nickname,
@@ -2716,9 +2730,18 @@ function registerChannelPackEndpoints(
           const results: RpcCreditsClaimAllResponse['results'] = []
           const outcomes: ClaimOutcome[] = []
           for (const account of accounts) {
-            const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
             let accountOutcomes: ClaimOutcome[]
-            if (!resolved) {
+            let resolved: Awaited<ReturnType<typeof ctx.credentials.resolve>>
+            let resolveError: string | undefined
+            try {
+              resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+            } catch (error) {
+              ctx.logger?.warn?.(`[channel-pack] credits.claimAll 账号 ${account.id} 失败: ${String(error)}`)
+              resolveError = error instanceof Error ? error.message : String(error)
+            }
+            if (resolveError !== undefined) {
+              accountOutcomes = [{ kind: 'failed', code: -1, message: resolveError }]
+            } else if (!resolved) {
               accountOutcomes = [{ kind: 'failed', code: -1, message: '凭据未配置' }]
             } else {
               let credential: ZcodeCredential | undefined

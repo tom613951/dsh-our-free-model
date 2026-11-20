@@ -56887,8 +56887,15 @@ async function triggerWorkBuddyIntlDailyActive(credential, product, fetcher = fe
   heartbeatHeaders.set("Content-Type", "application/json");
   heartbeatHeaders.set("User-Agent", resolveUserAgent(product, "fast-model"));
   heartbeatHeaders.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || "www.workbuddy.ai");
-  heartbeatHeaders.set(HTTP_HEADER_PRODUCT, BUDDY_DEPLOYMENT_TYPE);
   heartbeatHeaders.set(HTTP_HEADER_PRODUCT_CODE, product.productCode);
+  heartbeatHeaders.set("X-Agent-Purpose", "conversation");
+  heartbeatHeaders.set("X-IDE-Name", product.attributionName);
+  heartbeatHeaders.set("X-IDE-Type", product.attributionName);
+  heartbeatHeaders.set("X-IDE-Version", product.clientVersion);
+  heartbeatHeaders.set(HTTP_HEADER_PRODUCT, product.attributionName);
+  heartbeatHeaders.set("X-Conversation-ID", crypto.randomUUID());
+  heartbeatHeaders.set("X-Conversation-Message-ID", crypto.randomUUID());
+  heartbeatHeaders.set("X-Conversation-Request-ID", crypto.randomUUID());
   if (credential.user_id) heartbeatHeaders.set("X-User-Id", credential.user_id);
   if (credential.enterprise_id) {
     heartbeatHeaders.set("X-Enterprise-Id", credential.enterprise_id);
@@ -60560,6 +60567,7 @@ function createAutoCheckin(deps) {
   const now = deps.now ?? (() => Date.now());
   let doc = deps.store.load();
   let running2 = false;
+  let stopped = false;
   let inflight = null;
   let pending = null;
   let tick = null;
@@ -60588,8 +60596,13 @@ function createAutoCheckin(deps) {
       deps.warn?.(`[channel-pack] \u81EA\u52A8\u7B7E\u5230\uFF1A\u8BFB\u53D6\u8D26\u53F7\u6C60\u5931\u8D25\uFF0C\u672C\u6B21\u8DF3\u8FC7: ${String(error)}`);
       return;
     }
+    if (stopped) return;
     const channels = [];
     for (const provider of providers) {
+      if (stopped) {
+        deps.warn?.("[channel-pack] \u81EA\u52A8\u7B7E\u5230\u56E0\u5BBF\u4E3B\u5173\u95ED\u4E2D\u65AD\uFF0C\u672A\u8BB0\u5165\u4ECA\u65E5\uFF08\u4E0B\u6B21\u542F\u52A8\u4F1A\u91CD\u8BD5\uFF09");
+        return;
+      }
       if (isAutoCheckinExcluded(provider)) {
         totals.skipped += 1;
         channels.push({ provider, text: "\u9700\u624B\u52A8\u7B7E\u5230" });
@@ -60599,10 +60612,18 @@ function createAutoCheckin(deps) {
       try {
         result = await deps.claim(provider);
       } catch (error) {
+        if (stopped) {
+          deps.warn?.("[channel-pack] \u81EA\u52A8\u7B7E\u5230\u56E0\u5BBF\u4E3B\u5173\u95ED\u4E2D\u65AD\uFF0C\u672A\u8BB0\u5165\u4ECA\u65E5\uFF08\u4E0B\u6B21\u542F\u52A8\u4F1A\u91CD\u8BD5\uFF09");
+          return;
+        }
         totals.errors += 1;
         channels.push({ provider, text: "\u51FA\u9519" });
         deps.warn?.(`[channel-pack] \u81EA\u52A8\u7B7E\u5230\uFF1A${provider} \u8C03\u7528\u5F02\u5E38: ${String(error)}`);
         continue;
+      }
+      if (stopped) {
+        deps.warn?.("[channel-pack] \u81EA\u52A8\u7B7E\u5230\u56E0\u5BBF\u4E3B\u5173\u95ED\u4E2D\u65AD\uFF0C\u672A\u8BB0\u5165\u4ECA\u65E5\uFF08\u4E0B\u6B21\u542F\u52A8\u4F1A\u91CD\u8BD5\uFF09");
+        return;
       }
       if (!result.ok) {
         const message2 = typeof result.error?.message === "string" ? result.error.message : "";
@@ -60633,6 +60654,10 @@ function createAutoCheckin(deps) {
       totals.coversToday += summary.coversToday ?? summary.claimed + summary.alreadyClaimed;
       channels.push({ provider, text: describeChannel(summary) });
     }
+    if (stopped) {
+      deps.warn?.("[channel-pack] \u81EA\u52A8\u7B7E\u5230\u56E0\u5BBF\u4E3B\u5173\u95ED\u4E2D\u65AD\uFF0C\u672A\u8BB0\u5165\u4ECA\u65E5\uFF08\u4E0B\u6B21\u542F\u52A8\u4F1A\u91CD\u8BD5\uFF09");
+      return;
+    }
     if (!shouldMarkToday(totals)) {
       deps.warn?.(
         `[channel-pack] \u81EA\u52A8\u7B7E\u5230\u672A\u8BB0\u5165\u4ECA\u65E5\uFF08\u4E0B\u6B21\u542F\u52A8\u4F1A\u91CD\u8BD5\uFF09\uFF1A${describeRun(totals)}`
@@ -60657,6 +60682,7 @@ function createAutoCheckin(deps) {
     deps.warn?.(`[channel-pack] \u81EA\u52A8\u7B7E\u5230\u5B8C\u6210\uFF08${today()}\uFF09\uFF1A${doc.lastResult}`);
   }
   function runIfDue() {
+    if (stopped) return Promise.resolve();
     if (inflight !== null) return inflight;
     if (!doc.enabled) return Promise.resolve();
     if (doc.lastDate !== "" && doc.lastDate === today()) return Promise.resolve();
@@ -60679,6 +60705,7 @@ function createAutoCheckin(deps) {
       return state();
     },
     start() {
+      stopped = false;
       if (pending !== null || tick !== null) return;
       const ms = deps.delayMs ?? autoCheckinDelayMs();
       const fire = () => {
@@ -60711,6 +60738,7 @@ function createAutoCheckin(deps) {
       return state();
     },
     stop() {
+      stopped = true;
       pending?.cancel();
       pending = null;
       tick?.cancel();
@@ -62194,7 +62222,22 @@ function registerChannelPackEndpoints(ctx, pool, lobsterai, qoder, qoderCn, trae
         if (req.provider === LOOMY.id) {
           const values = [];
           for (const account2 of accounts) {
-            const resolved = await ctx.credentials.resolve(credentialRef13(account2.credentialRef));
+            let resolved;
+            try {
+              resolved = await ctx.credentials.resolve(credentialRef13(account2.credentialRef));
+            } catch (error) {
+              ctx.logger?.warn?.(`[channel-pack] credits.claimAll \u8D26\u53F7 ${account2.id} \u5931\u8D25: ${String(error)}`);
+              values.push({
+                accountId: account2.id,
+                nickname: account2.nickname,
+                outcome: {
+                  kind: "failed",
+                  code: -1,
+                  message: error instanceof Error ? error.message : String(error)
+                }
+              });
+              continue;
+            }
             if (!resolved) {
               values.push({
                 accountId: account2.id,
@@ -62256,9 +62299,18 @@ function registerChannelPackEndpoints(ctx, pool, lobsterai, qoder, qoderCn, trae
           const results = [];
           const outcomes = [];
           for (const account2 of accounts) {
-            const resolved = await ctx.credentials.resolve(credentialRef13(account2.credentialRef));
             let accountOutcomes;
-            if (!resolved) {
+            let resolved;
+            let resolveError;
+            try {
+              resolved = await ctx.credentials.resolve(credentialRef13(account2.credentialRef));
+            } catch (error) {
+              ctx.logger?.warn?.(`[channel-pack] credits.claimAll \u8D26\u53F7 ${account2.id} \u5931\u8D25: ${String(error)}`);
+              resolveError = error instanceof Error ? error.message : String(error);
+            }
+            if (resolveError !== void 0) {
+              accountOutcomes = [{ kind: "failed", code: -1, message: resolveError }];
+            } else if (!resolved) {
               accountOutcomes = [{ kind: "failed", code: -1, message: "\u51ED\u636E\u672A\u914D\u7F6E" }];
             } else {
               let credential;

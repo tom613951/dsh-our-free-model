@@ -204,6 +204,63 @@ await check('渠道枚举异常也受退避保护，不因未落盘结果而反�
   checkin.stop()
 })
 
+await check('运行中调用 stop() 立即中断且不记入今日（即使已有渠道成功）', async () => {
+  const stored = EMPTY_DOC()
+  const claims = []
+  let saveCalls = 0
+  let releaseBeta
+  const betaStarted = new Promise((resolve) => {
+    releaseBeta = resolve
+  })
+  let rejectBeta
+  const checkin = createAutoCheckin({
+    store: {
+      load: () => stored,
+      save: async (value) => {
+        saveCalls++
+        Object.assign(stored, value)
+      },
+      flush() {},
+    },
+    now: () => utc8('2026-10-27', 9),
+    listProviderIds: async () => ['alpha', 'beta', 'gamma'],
+    claim: async (provider) => {
+      claims.push(provider)
+      if (provider === 'alpha') {
+        return { ok: true, value: { summary: { claimed: 2, totalCredit: 200, coversToday: 2 }, accounts: [] } }
+      }
+      if (provider === 'beta') {
+        releaseBeta()
+        return await new Promise((_, reject) => {
+          rejectBeta = reject
+        })
+      }
+      throw new Error('gamma must never run after stop()')
+    },
+    delayMs: 0,
+    tickMs: 0,
+    schedule: (fn) => {
+      fn()
+      return { cancel() {} }
+    },
+    warn() {},
+  })
+
+  const runPromise = checkin.runIfDue()
+  await betaStarted
+  checkin.stop()
+  rejectBeta(new Error('credentials service disposed'))
+  await runPromise
+
+  assert.deepEqual(claims, ['alpha', 'beta'], '中断后不得再继续执行后续渠道')
+  assert.equal(saveCalls, 0, '中断的轮次不得持久化落盘')
+  assert.equal(stored.lastDate, '', '中断的轮次绝不能记入今日 lastDate')
+  assert.equal(stored.lastResult, '', '中断的轮次绝不能写入损坏的 lastResult')
+
+  await checkin.runIfDue()
+  assert.deepEqual(claims, ['alpha', 'beta'], 'stop() 后在未重新 start() 前 runIfDue 应直接跳过')
+})
+
 await check('默认常量符合设计（巡检 2.5h、退避 1h）', async () => {
   assert.equal(AUTO_CHECKIN_TICK_MS, 150 * 60 * 1000)
   assert.equal(AUTO_CHECKIN_RETRY_MS, 60 * 60 * 1000)
