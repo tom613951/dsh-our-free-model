@@ -29355,9 +29355,11 @@ var ModelQueuedError = class extends LlmError {
     this.retryAfterMs = options.retryAfterMs;
   }
 };
-var BILLING_BUSINESS_CODE = "110";
+var BILLING_BUSINESS_CODES = ["110", "112"];
 function isBillingBusinessCode(code) {
-  return code === BILLING_BUSINESS_CODE || code === Number(BILLING_BUSINESS_CODE);
+  if (typeof code === "string") return BILLING_BUSINESS_CODES.includes(code);
+  if (typeof code === "number") return BILLING_BUSINESS_CODES.includes(String(code));
+  return false;
 }
 var QODER_BILLING_UTC_OFFSET_MS = 8 * 36e5;
 function nextUtc8DayStartMs(nowMs = Date.now()) {
@@ -29367,6 +29369,18 @@ function nextUtc8DayStartMs(nowMs = Date.now()) {
 }
 function looksLikeBillingError(text) {
   return /billing\s+daily\s+count\s+exceeded|daily\s+count\s+exceeded|billing_error/i.test(text);
+}
+function hasPricingHint(value) {
+  if (value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(hasPricingHint);
+  for (const [key, child] of Object.entries(value)) {
+    if (/^pricing[_-]?url$/i.test(key) && typeof child === "string" && child !== "") return true;
+    if (typeof child === "object" && child !== null && hasPricingHint(child)) return true;
+  }
+  return false;
+}
+function hasPricingHintText(text) {
+  return /"pricing[_-]?url"\s*:/i.test(text);
 }
 var QUEUE_MAX_DELAY_MS = 1e4;
 var QUEUE_MAX_ATTEMPTS = 180;
@@ -30533,11 +30547,15 @@ function createReasoningLoopDetector(options = {}) {
   let runChars = 0;
   let hitLines = 0;
   let hitDistinct = 0;
+  let hitRatio = 1;
   function feedPiece(piece) {
     text += piece;
     const window = text.slice(Math.max(0, text.length - windowChars));
     const lines = window.split("\n").map((line2) => line2.trim()).filter((line2) => line2.length > 0);
-    const looping = lines.length >= minLines && new Set(lines).size / lines.length < maxDistinctLineRatio;
+    const totalChars = lines.reduce((sum, line2) => sum + line2.length, 0);
+    const distinctChars = [...new Set(lines)].reduce((sum, line2) => sum + line2.length, 0);
+    const charRatio = totalChars === 0 ? 1 : distinctChars / totalChars;
+    const looping = lines.length >= minLines && charRatio < maxDistinctLineRatio;
     if (!looping) {
       runStart = 0;
       runChars = 0;
@@ -30550,6 +30568,7 @@ function createReasoningLoopDetector(options = {}) {
     cutAt = runStart;
     hitLines = lines.length;
     hitDistinct = new Set(lines).size;
+    hitRatio = charRatio;
     return true;
   }
   return {
@@ -30566,7 +30585,11 @@ function createReasoningLoopDetector(options = {}) {
         runChars,
         lines: hitLines,
         distinctLines: hitDistinct,
-        distinctLineRatio: hitLines === 0 ? 1 : hitDistinct / hitLines
+        // Char-weighted, matching the verdict (#748). The line-count ratio is
+        // still reported so a past incident stays readable against these
+        // diagnostics, but it is no longer what decides.
+        distinctLineRatio: hitLines === 0 ? 1 : hitDistinct / hitLines,
+        distinctCharRatio: hitRatio
       };
     },
     observe(delta) {
@@ -35501,6 +35524,22 @@ var LOBSTERAI_SESSION_DEAD_MARKERS = [
   "token rejected",
   "refresh token was rejected"
 ];
+var LOBSTERAI_BANNED_MARKERS = [
+  "abnormal behavior",
+  "abnormal behaviour",
+  "restricted use",
+  "account restricted",
+  "account suspended",
+  "account disabled",
+  "account banned",
+  "risk control",
+  "\u8FDD\u53CD",
+  "\u5F02\u5E38\u884C\u4E3A",
+  "\u5DF2\u88AB\u9650\u5236\u4F7F\u7528",
+  "\u8D26\u53F7\u5B58\u5728\u5F02\u5E38",
+  "\u8D26\u53F7\u5DF2\u88AB\u9650\u5236",
+  "\u98CE\u63A7"
+];
 var HTTP_PAYMENT_REQUIRED = 402;
 var HTTP_TOO_MANY_REQUESTS = 429;
 var HTTP_NOT_FOUND = 404;
@@ -35509,6 +35548,9 @@ function classifyLobsteraiError(status, body) {
   const lower = body.toLowerCase();
   for (const marker of LOBSTERAI_HARD_CREDIT_MARKERS) {
     if (lower.includes(marker.toLowerCase()) || body.includes(marker)) return "hard-credit";
+  }
+  for (const marker of LOBSTERAI_BANNED_MARKERS) {
+    if (lower.includes(marker.toLowerCase()) || body.includes(marker)) return "banned";
   }
   for (const marker of LOBSTERAI_SESSION_DEAD_MARKERS) {
     if (body.includes(marker)) return "session-dead";
@@ -35527,7 +35569,7 @@ function shouldRotateLobsteraiAccount(kind) {
   return kind !== "none";
 }
 function recordsLobsteraiRateLimit(kind) {
-  return kind === "hard-credit" || kind === "soft-rate" || kind === "not-found";
+  return kind === "hard-credit" || kind === "soft-rate" || kind === "not-found" || kind === "banned";
 }
 function isLobsteraiTerminalError(kind) {
   return kind === "session-dead";
@@ -35771,6 +35813,13 @@ function buildLobsteraiFailure(input) {
   if (kind === "hard-credit") {
     const prefix = exhausted ? `lobsterai: \u6A21\u578B ${model} \u6240\u6709\u8D26\u53F7\u5747\u4E0D\u53EF\u7528` : "lobsterai: \u79EF\u5206\u4E0D\u8DB3";
     return new LlmError6(`${prefix}\uFF08${detail}\uFF09`, "QUOTA_EXCEEDED", { status });
+  }
+  if (kind === "banned") {
+    return new LlmError6(
+      `lobsterai: \u8D26\u53F7\u88AB\u4E0A\u6E38\u98CE\u63A7\u505C\u7528\uFF0C\u9700\u8981\u5230\u5E73\u53F0\u7533\u8BC9\u6216\u66F4\u6362\u8D26\u53F7\uFF08${detail}\uFF09`,
+      "AUTH",
+      { status: status === 0 ? 403 : status }
+    );
   }
   if (exhausted) {
     return new LlmError6(
@@ -36130,6 +36179,16 @@ var LobsteraiAdapter = class extends LlmAdapter3 {
           model: options.model,
           fromStream: lastFromStream,
           exhausted: false
+        });
+      }
+      if (lastKind === "banned") {
+        throw buildLobsteraiFailure({
+          kind: lastKind,
+          status: lastStatus,
+          text: lastText,
+          model: options.model,
+          fromStream: lastFromStream,
+          exhausted: true
         });
       }
       if (attempt >= LOBSTERAI_MAX_ROTATE - 1) {
@@ -36742,6 +36801,22 @@ async function createGlue() {
     lastLength = encoded.length;
     return ptr;
   };
+  const freeString = (ptr, len) => {
+    if (ptr) exports.__wbindgen_export4(ptr, len, 1);
+  };
+  const withStrings = (texts, invoke) => {
+    const pointers = [];
+    const lengths = [];
+    try {
+      for (const text of texts) {
+        pointers.push(writeString(text));
+        lengths.push(lastLength);
+      }
+      return invoke(pointers, lengths);
+    } finally {
+      for (let i = 0; i < pointers.length; i++) freeString(pointers[i], lengths[i]);
+    }
+  };
   const callString = (invoke) => {
     let ptr = 0;
     let len = 0;
@@ -36840,6 +36915,8 @@ async function createGlue() {
     view,
     readString: readString8,
     writeString,
+    freeString,
+    withStrings,
     lastLength: () => lastLength,
     heapObject,
     pushObject,
@@ -36857,10 +36934,9 @@ async function generateRuntimeAuthFields(user) {
     organization_tags: user.organizationTags ?? [],
     data_policy_agreed: user.dataPolicyAgreed ?? false
   });
-  const raw = g.callString((stack) => {
-    const a = g.writeString(payload);
-    g.exports.generate_runtime_auth_fields(stack, a, g.lastLength());
-  });
+  const raw = g.withStrings([payload], ([a], [aLen]) => g.callString((stack) => {
+    g.exports.generate_runtime_auth_fields(stack, a, aLen);
+  }));
   return JSON.parse(raw);
 }
 var QoderEncryptedInfer = class _QoderEncryptedInfer {
@@ -36887,17 +36963,12 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
       organization_tags: options.user.organizationTags ?? [],
       data_policy_agreed: options.user.dataPolicyAgreed ?? false
     });
-    const context = g.callPointer((stack) => {
-      const machine = g.writeString(options.machineId);
-      const machineLen = g.lastLength();
-      const ver = g.writeString(version);
-      const verLen = g.lastLength();
-      const info = g.writeString(userInfoJson);
-      const infoLen = g.lastLength();
-      const meta = g.writeString(JSON.stringify(options.metadata));
-      const metaLen = g.lastLength();
-      g.exports.qodercontext_new(stack, machine, machineLen, ver, verLen, info, infoLen, meta, metaLen);
-    });
+    const context = g.withStrings(
+      [options.machineId, version, userInfoJson, JSON.stringify(options.metadata)],
+      ([machine, ver, info, meta], [machineLen, verLen, infoLen, metaLen]) => g.callPointer((stack) => {
+        g.exports.qodercontext_new(stack, machine, machineLen, ver, verLen, info, infoLen, meta, metaLen);
+      })
+    );
     return new _QoderEncryptedInfer(g, context, options.metadata, options.host);
   }
   /**
@@ -36910,28 +36981,23 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
   prepareInfer(ask) {
     const g = this.g;
     const payload = buildQoderInferPayload(ask);
-    const result = g.callPointer((stack) => {
-      const host = g.writeString(this.host);
-      const hostLen = g.lastLength();
-      const body = g.writeString(JSON.stringify(payload));
-      const bodyLen = g.lastLength();
-      const key = g.writeString(ask.modelKey);
-      const keyLen = g.lastLength();
-      const source = g.writeString(ask.source ?? "system");
-      const sourceLen = g.lastLength();
-      g.exports.qodercontext_prepareInferRequest(
-        stack,
-        this.context,
-        host,
-        hostLen,
-        body,
-        bodyLen,
-        key,
-        keyLen,
-        source,
-        sourceLen
-      );
-    });
+    const result = g.withStrings(
+      [this.host, JSON.stringify(payload), ask.modelKey, ask.source ?? "system"],
+      ([host, body, key, source], [hostLen, bodyLen, keyLen, sourceLen]) => g.callPointer((stack) => {
+        g.exports.qodercontext_prepareInferRequest(
+          stack,
+          this.context,
+          host,
+          hostLen,
+          body,
+          bodyLen,
+          key,
+          keyLen,
+          source,
+          sourceLen
+        );
+      })
+    );
     const headerMap = g.takeObject(g.exports.requestresult_headers(result));
     const headers = {};
     if (headerMap instanceof Map) {
@@ -36939,15 +37005,18 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
     }
     const readResultString = (invoke) => {
       let out = "";
+      let outPtr = 0;
+      let outLen = 0;
       const v = g.view();
       const stack = g.exports.__wbindgen_add_to_stack_pointer(-16);
       try {
         invoke(stack, result);
-        const ptr = v.getInt32(stack + 0, true);
-        const len = v.getInt32(stack + 4, true);
-        out = ptr ? g.readString(ptr, len) : "";
+        outPtr = v.getInt32(stack + 0, true);
+        outLen = v.getInt32(stack + 4, true);
+        out = outPtr ? g.readString(outPtr, outLen) : "";
       } finally {
         g.exports.__wbindgen_add_to_stack_pointer(16);
+        g.freeString(outPtr, outLen);
       }
       return out;
     };
@@ -37687,6 +37756,9 @@ async function* consumeOpenAiSse(response, options, config) {
         if (data.choices === void 0 && config.isQuotaError?.(data)) {
           throw new LlmError8(`${label}: ${errorDetail4(payload)}`, "QUOTA_EXCEEDED");
         }
+        if (data.choices === void 0 && hasPricingHint(data)) {
+          throw new LlmError8(`${label}: ${errorDetail4(payload)}`, "QUOTA_EXCEEDED");
+        }
         if (data.error !== void 0) {
           throw new LlmError8(`${label}: ${data.error.message ?? "unknown error"}`, "SERVER");
         }
@@ -37702,7 +37774,7 @@ async function* consumeOpenAiSse(response, options, config) {
               }
             );
           }
-          if (isBillingBusinessCode(data.code) || looksLikeBillingError(data.message)) {
+          if (isBillingBusinessCode(data.code) || looksLikeBillingError(data.message) || hasPricingHint(data)) {
             throw new LlmError8(
               `${label}: ${data.message}`,
               "QUOTA_EXCEEDED",
@@ -37946,9 +38018,11 @@ var qoderQueueDelayMs = queueDelayMs;
 function isQuotaExceededError2(error) {
   if (error instanceof LlmError9) {
     if (error.code === "QUOTA_EXCEEDED" || error.code === "QUOTA") return true;
+    if (hasPricingHint(error.body)) return true;
+    if (hasPricingHintText(error.message)) return true;
   }
   if (error instanceof Error) {
-    if (!(error instanceof LlmError9)) return looksLikeBillingError(error.message);
+    if (!(error instanceof LlmError9)) return looksLikeBillingError(error.message) || hasPricingHintText(error.message);
   }
   return false;
 }
@@ -38371,11 +38445,17 @@ var QoderAdapter = class extends LlmAdapter4 {
       if (!response.ok && (response.status === 401 || response.status === 403)) {
         const errorText = await response.text().catch(() => "");
         const queueInfo = parseQoderQueueError(errorText);
+        let errorBody;
+        try {
+          errorBody = JSON.parse(errorText);
+        } catch {
+          errorBody = void 0;
+        }
         if (queueInfo !== void 0) {
           await retryQueuedRequest(queueInfo);
           continue;
         }
-        if (isBillingBusinessCode(response.status) || looksLikeBillingError(errorText)) {
+        if (isBillingBusinessCode(response.status) || looksLikeBillingError(errorText) || hasPricingHint(errorBody)) {
           const switched = await this.switchAccountOnQuota(options, triedAccounts, activeAccountId);
           if (switched !== void 0) {
             credential = switched.credential;
