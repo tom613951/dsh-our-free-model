@@ -681,25 +681,340 @@ export async function fetchCheckinStatus(
   }
 }
 
+/** WorkBuddy 国际版心跳优先使用的轻量模型候选（避开下线的 fast-model 与多模态计费模型）。 */
+const PREFERRED_WORKBUDDY_HEARTBEAT_MODELS = [
+  'hy4flash-free',
+  'hy4flash',
+  'deepseek-v4.1-flash-sg',
+  'glm-5.3-flash',
+  'auto',
+] as const
+
+const FALLBACK_WORKBUDDY_HEARTBEAT_MODEL = 'auto'
+const HEARTBEAT_CONFIG_TIMEOUT_MS = 10_000
+const HEARTBEAT_RESPONSE_MAX_CHARS = 16_384
+
+export interface WorkBuddyHeartbeatOptions {
+  /** 可选指定心跳模型，跳过 `/v3/config` 探测。 */
+  model?: string
+}
+
+interface ParsedHeartbeatError {
+  code?: number
+  message: string
+}
+
+function isHeartbeatChatCandidate(modelId: string): boolean {
+  const lower = modelId.trim().toLowerCase()
+  if (!lower || lower === 'fast-model') return false
+  return !(
+    lower.includes('image') ||
+    lower.includes('video') ||
+    lower.startsWith('kling-') ||
+    lower.startsWith('hy-image')
+  )
+}
+
+/** 从 `/v3/config` 动态挑选可用轻量模型，避免写死已下线的 `fast-model`。 */
+async function resolveWorkBuddyHeartbeatModel(
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  fetcher: typeof fetch,
+  overrideModel?: string,
+): Promise<string> {
+  if (overrideModel && overrideModel.trim().length > 0) {
+    return overrideModel.trim()
+  }
+
+  try {
+    const configHeaders = new Headers()
+    configHeaders.set('Authorization', `Bearer ${credential.access_token}`)
+    configHeaders.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || 'www.workbuddy.ai')
+    configHeaders.set(HTTP_HEADER_PRODUCT_CODE, product.productCode)
+    configHeaders.set(HTTP_HEADER_PRODUCT, BUDDY_DEPLOYMENT_TYPE)
+    configHeaders.set('User-Agent', product.userAgent)
+    if (credential.user_id) configHeaders.set('X-User-Id', credential.user_id)
+
+    const configRes = await fetcher(`${product.endpoint}/v3/config`, {
+      method: 'GET',
+      headers: configHeaders,
+      signal: AbortSignal.timeout(HEARTBEAT_CONFIG_TIMEOUT_MS),
+    })
+    if (!configRes.ok) return FALLBACK_WORKBUDDY_HEARTBEAT_MODEL
+
+    const body = (await configRes.json()) as Record<string, unknown>
+    const data =
+      body.data && typeof body.data === 'object' ? (body.data as Record<string, unknown>) : undefined
+    if (!data) return FALLBACK_WORKBUDDY_HEARTBEAT_MODEL
+
+    const candidates: string[] = []
+    const agents = Array.isArray(data.agents) ? (data.agents as Array<Record<string, unknown>>) : []
+    const cliAgent =
+      agents.find((a) => a.name === 'cli' || a.type === 'cli') ??
+      agents.find((a) => a.name === 'craft') ??
+      agents[0]
+    if (cliAgent && Array.isArray(cliAgent.models)) {
+      for (const m of cliAgent.models) {
+        if (typeof m === 'string' && isHeartbeatChatCandidate(m)) candidates.push(m)
+      }
+    }
+    const rawModels = Array.isArray(data.models) ? (data.models as Array<Record<string, unknown>>) : []
+    for (const entry of rawModels) {
+      const id = readString(entry, 'id')
+      if (id && isHeartbeatChatCandidate(id) && !candidates.includes(id)) {
+        candidates.push(id)
+      }
+    }
+
+    for (const preferred of PREFERRED_WORKBUDDY_HEARTBEAT_MODELS) {
+      if (candidates.includes(preferred)) return preferred
+    }
+    if (candidates.length > 0) return candidates[0]
+  } catch {
+    // 远端配置不可达或单测未 mock `/v3/config` 时退回默认轻量路由模型
+  }
+
+  return FALLBACK_WORKBUDDY_HEARTBEAT_MODEL
+}
+
+function toFiniteErrorCode(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value)
+  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) return Number.parseInt(value.trim(), 10)
+  return undefined
+}
+
+function extractHeartbeatErrorFromRecord(record: Record<string, unknown>): ParsedHeartbeatError | null {
+  const nestedError =
+    record.error && typeof record.error === 'object' ? (record.error as Record<string, unknown>) : undefined
+  const code =
+    toFiniteErrorCode(record.code) ??
+    toFiniteErrorCode(record.error_code) ??
+    toFiniteErrorCode(nestedError?.code)
+  const hasExplicitError =
+    record.error !== undefined && record.error !== null && record.error !== false
+
+  if ((code === undefined || code === 0) && !hasExplicitError) {
+    return null
+  }
+
+  const displayMsg =
+    record.displayMsg && typeof record.displayMsg === 'object'
+      ? (record.displayMsg as Record<string, unknown>)
+      : undefined
+  const message =
+    (displayMsg ? readString(displayMsg, 'zh') || readString(displayMsg, 'en') : '') ||
+    readString(record, 'msg') ||
+    readString(record, 'message') ||
+    readString(record, 'error_msg') ||
+    (nestedError ? readString(nestedError, 'message') || readString(nestedError, 'msg') : '') ||
+    (typeof record.error === 'string' ? record.error.trim() : '') ||
+    ''
+
+  return {
+    ...(code !== undefined ? { code } : {}),
+    message,
+  }
+}
+
+function parseHeartbeatErrorPayload(rawText: string): ParsedHeartbeatError | null {
+  const trimmed = rawText.trim()
+  if (!trimmed) return null
+
+  if (!trimmed.startsWith('data:')) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return extractHeartbeatErrorFromRecord(parsed as Record<string, unknown>)
+      }
+    } catch {
+      // Fall through to SSE / raw-text handling
+    }
+  }
+
+  for (const line of trimmed.split(/\r?\n/)) {
+    const clean = line.trim()
+    if (!clean.startsWith('data:')) continue
+    const dataStr = clean.slice(5).trim()
+    if (!dataStr || dataStr === '[DONE]') continue
+    try {
+      const chunk = JSON.parse(dataStr) as unknown
+      if (chunk && typeof chunk === 'object' && !Array.isArray(chunk)) {
+        const hit = extractHeartbeatErrorFromRecord(chunk as Record<string, unknown>)
+        if (hit) return hit
+      }
+    } catch {
+      // Ignore malformed/partial SSE chunk
+    }
+  }
+
+  return null
+}
+
+/** 安全读取响应首屏文本或首帧 SSE，避免在流式长连接上阻塞。 */
+async function readHeartbeatResponseSnippet(res: Response): Promise<string> {
+  try {
+    if (res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      try {
+        while (buffer.length < HEARTBEAT_RESPONSE_MAX_CHARS) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          if (res.ok && buffer.includes('data:')) {
+            if (parseHeartbeatErrorPayload(buffer) !== null) break
+            if (buffer.includes('"choices"') || buffer.includes('[DONE]')) break
+          }
+        }
+        buffer += decoder.decode()
+      } finally {
+        await reader.cancel().catch(() => {})
+      }
+      return buffer.slice(0, HEARTBEAT_RESPONSE_MAX_CHARS)
+    }
+
+    if (typeof res.text === 'function') {
+      return (await res.text()).slice(0, HEARTBEAT_RESPONSE_MAX_CHARS)
+    }
+  } catch {
+    // Ignore stream/body read failures after HTTP status is inspected
+  }
+  return ''
+}
+
+function buildHeartbeatFailure(status: number, rawBody: string, parsed: ParsedHeartbeatError | null): ClaimOutcome {
+  const errCode = parsed?.code
+  const fallbackText =
+    parsed?.message ||
+    (rawBody.trim() && !rawBody.trim().startsWith('<') ? rawBody.trim().slice(0, 180) : '')
+
+  if (status === 401) {
+    return {
+      kind: 'failed',
+      code: 401,
+      message: fallbackText ? `凭据已失效（HTTP 401）：${fallbackText}` : '凭据已失效（HTTP 401），请重新登录',
+    }
+  }
+
+  if (status === 403 || errCode === 11140) {
+    if (errCode === 11140 || /unusual activity|request illegal|异常行为|限制使用/i.test(fallbackText)) {
+      return {
+        kind: 'failed',
+        code: 403,
+        message: `账号触发风控限制（11140）：${fallbackText || '账号存在异常行为，已被限制使用'}`,
+      }
+    }
+    return {
+      kind: 'failed',
+      code: 403,
+      message: fallbackText
+        ? `心跳请求被拒绝（HTTP 403${errCode ? `/${errCode}` : ''}）：${fallbackText}`
+        : '凭据已失效或权限受限（HTTP 403），请重新登录',
+    }
+  }
+
+  if (status === 429) {
+    return {
+      kind: 'failed',
+      code: 429,
+      message: fallbackText
+        ? `触发上游限流（HTTP 429${errCode ? `/${errCode}` : ''}）：${fallbackText}`
+        : '触发上游限流（HTTP 429），请稍后再试',
+    }
+  }
+
+  if (!Number.isFinite(status) || status < 200 || status >= 300) {
+    const codeSuffix = errCode && errCode !== status ? `/${errCode}` : ''
+    return {
+      kind: 'failed',
+      code: errCode ?? status,
+      message: fallbackText
+        ? `心跳激活失败（HTTP ${status}${codeSuffix}）：${fallbackText}`
+        : `心跳激活失败（HTTP ${status}）`,
+    }
+  }
+
+  const resolvedCode = errCode ?? 500
+  return {
+    kind: 'failed',
+    code: resolvedCode,
+    message: fallbackText ? `心跳流响应异常（${resolvedCode}）：${fallbackText}` : `心跳流响应异常（${resolvedCode}）`,
+  }
+}
+
+/** 补发 `chat_request_send` 活跃事件（最佳努力，对齐客户端日常上报）。 */
+async function sendWorkBuddyActivityReport(
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  fetcher: typeof fetch,
+  conversationId: string,
+  requestId: string,
+  modelId: string,
+): Promise<void> {
+  if (!credential.user_id) return
+  try {
+    const reportHeaders = new Headers()
+    reportHeaders.set('Authorization', `Bearer ${credential.access_token}`)
+    reportHeaders.set('Accept', 'application/json, text/plain, */*')
+    reportHeaders.set('Content-Type', 'application/json;charset=UTF-8')
+    reportHeaders.set('X-Request-ID', crypto.randomUUID())
+    reportHeaders.set('X-Product', BUDDY_DEPLOYMENT_TYPE)
+    reportHeaders.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || 'www.workbuddy.ai')
+    reportHeaders.set('X-User-Id', credential.user_id)
+    reportHeaders.set('User-Agent', resolveUserAgent(product, modelId))
+
+    await fetcher(`${product.endpoint}/v2/report`, {
+      method: 'POST',
+      headers: reportHeaders,
+      body: JSON.stringify([
+        {
+          eventCode: 'chat_request_send',
+          timestamp: Date.now(),
+          reportDelay: 0,
+          mode: 'craft',
+          conversationId,
+          requestId,
+          inputLength: 4,
+          requestModelId: modelId,
+          requestModelName: modelId,
+          agentName: 'cli',
+          agentType: 'main',
+          product: product.attributionName,
+          userId: credential.user_id,
+        },
+      ]),
+      signal: AbortSignal.timeout(HEARTBEAT_CONFIG_TIMEOUT_MS),
+    })
+  } catch {
+    // 埋点上报失败不阻断已成功的对话心跳结果
+  }
+}
+
 /**
  * WorkBuddy 国际版（workbuddy.ai）每日活跃打卡。
  *
  * 国际版无每日签到或成长中心 H5 路由，其每日配额机制是：
- * 通过向对话接口发起轻量免额度心跳，激活服务端当日活跃度判定，触发 Daily Active 配额下发。
+ * 向流式对话接口发送轻量请求（`stream: true` + `system` 消息）并上报活跃事件，
+ * 激活服务端当日活跃度判定；失败状态（400/403-11140/429/流内错误）如实报错。
  */
 export async function triggerWorkBuddyIntlDailyActive(
   credential: BuddyCredential,
   product: BuddyProduct,
   fetcher: typeof fetch = fetch,
+  options?: WorkBuddyHeartbeatOptions,
 ): Promise<ClaimOutcome> {
   if (!credential.access_token) {
     return { kind: 'failed', code: 401, message: '凭据缺少 access_token，请重新登录' }
   }
 
+  const heartbeatModel = await resolveWorkBuddyHeartbeatModel(credential, product, fetcher, options?.model)
+
   const heartbeatHeaders = new Headers()
   heartbeatHeaders.set('Authorization', `Bearer ${credential.access_token}`)
+  heartbeatHeaders.set('Accept', 'text/event-stream')
   heartbeatHeaders.set('Content-Type', 'application/json')
-  heartbeatHeaders.set('User-Agent', resolveUserAgent(product, 'fast-model'))
+  heartbeatHeaders.set('User-Agent', resolveUserAgent(product, heartbeatModel))
   heartbeatHeaders.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || 'www.workbuddy.ai')
   heartbeatHeaders.set(HTTP_HEADER_PRODUCT_CODE, product.productCode)
   heartbeatHeaders.set('X-Agent-Purpose', 'conversation')
@@ -722,21 +1037,32 @@ export async function triggerWorkBuddyIntlDailyActive(
       method: 'POST',
       headers: heartbeatHeaders,
       body: JSON.stringify({
-        model: 'fast-model',
-        messages: [{ role: 'user', content: 'ping' }],
-        stream: false,
+        model: heartbeatModel,
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant.' },
+          { role: 'user', content: 'ping' },
+        ],
+        stream: true,
         max_tokens: 1,
       }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
 
-    if (chatRes.status === 401 || chatRes.status === 403) {
-      return { kind: 'failed', code: chatRes.status, message: `凭据已失效（HTTP ${chatRes.status}），请重新登录` }
+    const rawBody = await readHeartbeatResponseSnippet(chatRes)
+    const parsedError = parseHeartbeatErrorPayload(rawBody)
+
+    if (!chatRes.ok || parsedError !== null) {
+      return buildHeartbeatFailure(chatRes.status, rawBody, parsedError)
     }
 
-    if (!chatRes.ok && chatRes.status !== 400 && chatRes.status !== 429) {
-      return { kind: 'failed', code: chatRes.status, message: `心跳激活失败（HTTP ${chatRes.status}）` }
-    }
+    await sendWorkBuddyActivityReport(
+      credential,
+      product,
+      fetcher,
+      heartbeatHeaders.get('X-Conversation-ID') ?? crypto.randomUUID(),
+      heartbeatHeaders.get('X-Conversation-Request-ID') ?? crypto.randomUUID(),
+      heartbeatModel,
+    )
 
     let extraNote = ''
     try {
@@ -753,7 +1079,7 @@ export async function triggerWorkBuddyIntlDailyActive(
       credit: 0,
       streakDays: 0,
       isStreakDay: false,
-      delayedMessage: `已向国际版发送轻量心跳激活当日活跃配额${extraNote}`,
+      delayedMessage: `已向国际版发送流式心跳（${heartbeatModel}）激活当日活跃配额${extraNote}`,
     }
   } catch (error) {
     return {

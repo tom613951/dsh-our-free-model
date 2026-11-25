@@ -60375,14 +60375,235 @@ async function fetchCheckinStatus(credential, product, fetcher = fetch) {
     endTime: readString4(record, "end_time")
   };
 }
-async function triggerWorkBuddyIntlDailyActive(credential, product, fetcher = fetch) {
+var PREFERRED_WORKBUDDY_HEARTBEAT_MODELS = [
+  "hy4flash-free",
+  "hy4flash",
+  "deepseek-v4.1-flash-sg",
+  "glm-5.3-flash",
+  "auto"
+];
+var FALLBACK_WORKBUDDY_HEARTBEAT_MODEL = "auto";
+var HEARTBEAT_CONFIG_TIMEOUT_MS = 1e4;
+var HEARTBEAT_RESPONSE_MAX_CHARS = 16384;
+function isHeartbeatChatCandidate(modelId) {
+  const lower = modelId.trim().toLowerCase();
+  if (!lower || lower === "fast-model") return false;
+  return !(lower.includes("image") || lower.includes("video") || lower.startsWith("kling-") || lower.startsWith("hy-image"));
+}
+async function resolveWorkBuddyHeartbeatModel(credential, product, fetcher, overrideModel) {
+  if (overrideModel && overrideModel.trim().length > 0) {
+    return overrideModel.trim();
+  }
+  try {
+    const configHeaders = new Headers();
+    configHeaders.set("Authorization", `Bearer ${credential.access_token}`);
+    configHeaders.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || "www.workbuddy.ai");
+    configHeaders.set(HTTP_HEADER_PRODUCT_CODE, product.productCode);
+    configHeaders.set(HTTP_HEADER_PRODUCT, BUDDY_DEPLOYMENT_TYPE);
+    configHeaders.set("User-Agent", product.userAgent);
+    if (credential.user_id) configHeaders.set("X-User-Id", credential.user_id);
+    const configRes = await fetcher(`${product.endpoint}/v3/config`, {
+      method: "GET",
+      headers: configHeaders,
+      signal: AbortSignal.timeout(HEARTBEAT_CONFIG_TIMEOUT_MS)
+    });
+    if (!configRes.ok) return FALLBACK_WORKBUDDY_HEARTBEAT_MODEL;
+    const body = await configRes.json();
+    const data = body.data && typeof body.data === "object" ? body.data : void 0;
+    if (!data) return FALLBACK_WORKBUDDY_HEARTBEAT_MODEL;
+    const candidates = [];
+    const agents = Array.isArray(data.agents) ? data.agents : [];
+    const cliAgent = agents.find((a) => a.name === "cli" || a.type === "cli") ?? agents.find((a) => a.name === "craft") ?? agents[0];
+    if (cliAgent && Array.isArray(cliAgent.models)) {
+      for (const m of cliAgent.models) {
+        if (typeof m === "string" && isHeartbeatChatCandidate(m)) candidates.push(m);
+      }
+    }
+    const rawModels = Array.isArray(data.models) ? data.models : [];
+    for (const entry of rawModels) {
+      const id = readString4(entry, "id");
+      if (id && isHeartbeatChatCandidate(id) && !candidates.includes(id)) {
+        candidates.push(id);
+      }
+    }
+    for (const preferred of PREFERRED_WORKBUDDY_HEARTBEAT_MODELS) {
+      if (candidates.includes(preferred)) return preferred;
+    }
+    if (candidates.length > 0) return candidates[0];
+  } catch {
+  }
+  return FALLBACK_WORKBUDDY_HEARTBEAT_MODEL;
+}
+function toFiniteErrorCode(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) return Number.parseInt(value.trim(), 10);
+  return void 0;
+}
+function extractHeartbeatErrorFromRecord(record) {
+  const nestedError = record.error && typeof record.error === "object" ? record.error : void 0;
+  const code = toFiniteErrorCode(record.code) ?? toFiniteErrorCode(record.error_code) ?? toFiniteErrorCode(nestedError?.code);
+  const hasExplicitError = record.error !== void 0 && record.error !== null && record.error !== false;
+  if ((code === void 0 || code === 0) && !hasExplicitError) {
+    return null;
+  }
+  const displayMsg = record.displayMsg && typeof record.displayMsg === "object" ? record.displayMsg : void 0;
+  const message2 = (displayMsg ? readString4(displayMsg, "zh") || readString4(displayMsg, "en") : "") || readString4(record, "msg") || readString4(record, "message") || readString4(record, "error_msg") || (nestedError ? readString4(nestedError, "message") || readString4(nestedError, "msg") : "") || (typeof record.error === "string" ? record.error.trim() : "") || "";
+  return {
+    ...code !== void 0 ? { code } : {},
+    message: message2
+  };
+}
+function parseHeartbeatErrorPayload(rawText) {
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+  if (!trimmed.startsWith("data:")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return extractHeartbeatErrorFromRecord(parsed);
+      }
+    } catch {
+    }
+  }
+  for (const line2 of trimmed.split(/\r?\n/)) {
+    const clean = line2.trim();
+    if (!clean.startsWith("data:")) continue;
+    const dataStr = clean.slice(5).trim();
+    if (!dataStr || dataStr === "[DONE]") continue;
+    try {
+      const chunk = JSON.parse(dataStr);
+      if (chunk && typeof chunk === "object" && !Array.isArray(chunk)) {
+        const hit = extractHeartbeatErrorFromRecord(chunk);
+        if (hit) return hit;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+async function readHeartbeatResponseSnippet(res) {
+  try {
+    if (res.body && typeof res.body.getReader === "function") {
+      const reader = res.body.getReader();
+      const decoder2 = new TextDecoder();
+      let buffer = "";
+      try {
+        while (buffer.length < HEARTBEAT_RESPONSE_MAX_CHARS) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder2.decode(value, { stream: true });
+          if (res.ok && buffer.includes("data:")) {
+            if (parseHeartbeatErrorPayload(buffer) !== null) break;
+            if (buffer.includes('"choices"') || buffer.includes("[DONE]")) break;
+          }
+        }
+        buffer += decoder2.decode();
+      } finally {
+        await reader.cancel().catch(() => {
+        });
+      }
+      return buffer.slice(0, HEARTBEAT_RESPONSE_MAX_CHARS);
+    }
+    if (typeof res.text === "function") {
+      return (await res.text()).slice(0, HEARTBEAT_RESPONSE_MAX_CHARS);
+    }
+  } catch {
+  }
+  return "";
+}
+function buildHeartbeatFailure(status, rawBody, parsed) {
+  const errCode = parsed?.code;
+  const fallbackText = parsed?.message || (rawBody.trim() && !rawBody.trim().startsWith("<") ? rawBody.trim().slice(0, 180) : "");
+  if (status === 401) {
+    return {
+      kind: "failed",
+      code: 401,
+      message: fallbackText ? `\u51ED\u636E\u5DF2\u5931\u6548\uFF08HTTP 401\uFF09\uFF1A${fallbackText}` : "\u51ED\u636E\u5DF2\u5931\u6548\uFF08HTTP 401\uFF09\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55"
+    };
+  }
+  if (status === 403 || errCode === 11140) {
+    if (errCode === 11140 || /unusual activity|request illegal|异常行为|限制使用/i.test(fallbackText)) {
+      return {
+        kind: "failed",
+        code: 403,
+        message: `\u8D26\u53F7\u89E6\u53D1\u98CE\u63A7\u9650\u5236\uFF0811140\uFF09\uFF1A${fallbackText || "\u8D26\u53F7\u5B58\u5728\u5F02\u5E38\u884C\u4E3A\uFF0C\u5DF2\u88AB\u9650\u5236\u4F7F\u7528"}`
+      };
+    }
+    return {
+      kind: "failed",
+      code: 403,
+      message: fallbackText ? `\u5FC3\u8DF3\u8BF7\u6C42\u88AB\u62D2\u7EDD\uFF08HTTP 403${errCode ? `/${errCode}` : ""}\uFF09\uFF1A${fallbackText}` : "\u51ED\u636E\u5DF2\u5931\u6548\u6216\u6743\u9650\u53D7\u9650\uFF08HTTP 403\uFF09\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55"
+    };
+  }
+  if (status === 429) {
+    return {
+      kind: "failed",
+      code: 429,
+      message: fallbackText ? `\u89E6\u53D1\u4E0A\u6E38\u9650\u6D41\uFF08HTTP 429${errCode ? `/${errCode}` : ""}\uFF09\uFF1A${fallbackText}` : "\u89E6\u53D1\u4E0A\u6E38\u9650\u6D41\uFF08HTTP 429\uFF09\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5"
+    };
+  }
+  if (!Number.isFinite(status) || status < 200 || status >= 300) {
+    const codeSuffix = errCode && errCode !== status ? `/${errCode}` : "";
+    return {
+      kind: "failed",
+      code: errCode ?? status,
+      message: fallbackText ? `\u5FC3\u8DF3\u6FC0\u6D3B\u5931\u8D25\uFF08HTTP ${status}${codeSuffix}\uFF09\uFF1A${fallbackText}` : `\u5FC3\u8DF3\u6FC0\u6D3B\u5931\u8D25\uFF08HTTP ${status}\uFF09`
+    };
+  }
+  const resolvedCode = errCode ?? 500;
+  return {
+    kind: "failed",
+    code: resolvedCode,
+    message: fallbackText ? `\u5FC3\u8DF3\u6D41\u54CD\u5E94\u5F02\u5E38\uFF08${resolvedCode}\uFF09\uFF1A${fallbackText}` : `\u5FC3\u8DF3\u6D41\u54CD\u5E94\u5F02\u5E38\uFF08${resolvedCode}\uFF09`
+  };
+}
+async function sendWorkBuddyActivityReport(credential, product, fetcher, conversationId, requestId, modelId) {
+  if (!credential.user_id) return;
+  try {
+    const reportHeaders = new Headers();
+    reportHeaders.set("Authorization", `Bearer ${credential.access_token}`);
+    reportHeaders.set("Accept", "application/json, text/plain, */*");
+    reportHeaders.set("Content-Type", "application/json;charset=UTF-8");
+    reportHeaders.set("X-Request-ID", crypto.randomUUID());
+    reportHeaders.set("X-Product", BUDDY_DEPLOYMENT_TYPE);
+    reportHeaders.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || "www.workbuddy.ai");
+    reportHeaders.set("X-User-Id", credential.user_id);
+    reportHeaders.set("User-Agent", resolveUserAgent(product, modelId));
+    await fetcher(`${product.endpoint}/v2/report`, {
+      method: "POST",
+      headers: reportHeaders,
+      body: JSON.stringify([
+        {
+          eventCode: "chat_request_send",
+          timestamp: Date.now(),
+          reportDelay: 0,
+          mode: "craft",
+          conversationId,
+          requestId,
+          inputLength: 4,
+          requestModelId: modelId,
+          requestModelName: modelId,
+          agentName: "cli",
+          agentType: "main",
+          product: product.attributionName,
+          userId: credential.user_id
+        }
+      ]),
+      signal: AbortSignal.timeout(HEARTBEAT_CONFIG_TIMEOUT_MS)
+    });
+  } catch {
+  }
+}
+async function triggerWorkBuddyIntlDailyActive(credential, product, fetcher = fetch, options) {
   if (!credential.access_token) {
     return { kind: "failed", code: 401, message: "\u51ED\u636E\u7F3A\u5C11 access_token\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55" };
   }
+  const heartbeatModel = await resolveWorkBuddyHeartbeatModel(credential, product, fetcher, options?.model);
   const heartbeatHeaders = new Headers();
   heartbeatHeaders.set("Authorization", `Bearer ${credential.access_token}`);
+  heartbeatHeaders.set("Accept", "text/event-stream");
   heartbeatHeaders.set("Content-Type", "application/json");
-  heartbeatHeaders.set("User-Agent", resolveUserAgent(product, "fast-model"));
+  heartbeatHeaders.set("User-Agent", resolveUserAgent(product, heartbeatModel));
   heartbeatHeaders.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || "www.workbuddy.ai");
   heartbeatHeaders.set(HTTP_HEADER_PRODUCT_CODE, product.productCode);
   heartbeatHeaders.set("X-Agent-Purpose", "conversation");
@@ -60404,19 +60625,29 @@ async function triggerWorkBuddyIntlDailyActive(credential, product, fetcher = fe
       method: "POST",
       headers: heartbeatHeaders,
       body: JSON.stringify({
-        model: "fast-model",
-        messages: [{ role: "user", content: "ping" }],
-        stream: false,
+        model: heartbeatModel,
+        messages: [
+          { role: "system", content: "You are a helpful assistant." },
+          { role: "user", content: "ping" }
+        ],
+        stream: true,
         max_tokens: 1
       }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS3)
     });
-    if (chatRes.status === 401 || chatRes.status === 403) {
-      return { kind: "failed", code: chatRes.status, message: `\u51ED\u636E\u5DF2\u5931\u6548\uFF08HTTP ${chatRes.status}\uFF09\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55` };
+    const rawBody = await readHeartbeatResponseSnippet(chatRes);
+    const parsedError = parseHeartbeatErrorPayload(rawBody);
+    if (!chatRes.ok || parsedError !== null) {
+      return buildHeartbeatFailure(chatRes.status, rawBody, parsedError);
     }
-    if (!chatRes.ok && chatRes.status !== 400 && chatRes.status !== 429) {
-      return { kind: "failed", code: chatRes.status, message: `\u5FC3\u8DF3\u6FC0\u6D3B\u5931\u8D25\uFF08HTTP ${chatRes.status}\uFF09` };
-    }
+    await sendWorkBuddyActivityReport(
+      credential,
+      product,
+      fetcher,
+      heartbeatHeaders.get("X-Conversation-ID") ?? crypto.randomUUID(),
+      heartbeatHeaders.get("X-Conversation-Request-ID") ?? crypto.randomUUID(),
+      heartbeatModel
+    );
     let extraNote = "";
     try {
       const notifyRes = await postJson2("/v2/billing/meter/get-dosage-notify", credential, product, fetcher);
@@ -60432,7 +60663,7 @@ async function triggerWorkBuddyIntlDailyActive(credential, product, fetcher = fe
       credit: 0,
       streakDays: 0,
       isStreakDay: false,
-      delayedMessage: `\u5DF2\u5411\u56FD\u9645\u7248\u53D1\u9001\u8F7B\u91CF\u5FC3\u8DF3\u6FC0\u6D3B\u5F53\u65E5\u6D3B\u8DC3\u914D\u989D${extraNote}`
+      delayedMessage: `\u5DF2\u5411\u56FD\u9645\u7248\u53D1\u9001\u6D41\u5F0F\u5FC3\u8DF3\uFF08${heartbeatModel}\uFF09\u6FC0\u6D3B\u5F53\u65E5\u6D3B\u8DC3\u914D\u989D${extraNote}`
     };
   } catch (error) {
     return {
