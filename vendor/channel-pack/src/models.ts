@@ -61,6 +61,7 @@ export const MODEL_REFRESH_INTERVAL_MS = 2 * 3_600_000
 export interface RemoteModel {
   id: string
   name: string
+  contextWindow?: number
 }
 
 /** 模块级内存缓存：远端拉取或磁盘加载后填充；availableCodeArtsModels 优先读取。 */
@@ -72,8 +73,9 @@ let benefitMemoryCache: string[] | undefined
 /**
  * 去掉模型 id 末尾的日期版本后缀：deepseek-v4-flash-0731 → deepseek-v4-flash。
  * 远端 gateway/config 返回带日期后缀的 model_id（-0731 = 7月31日版本），
- * 但 chat 端点只认不带后缀的 id（InferHub.002002009.404 "model is not registered"）。
- * 仅匹配末尾 -NNNN（4 位数字），避免误去 glm-5.3-flash 等无后缀 id。
+ * 但早期非 benefit 通道只认无后缀 id。
+ * 仅用于 gateway/config；`/v1/model/builtin` 返回的 `deepseek-v4.1-flash-1017`
+ * 等带日期后缀 id 在后端是独立注册模型（与无后缀版并存），不可截断。
  */
 export function normalizeModelId(id: string): string {
   if (id.length > 5) {
@@ -85,19 +87,30 @@ export function normalizeModelId(id: string): string {
   return id
 }
 
-function parseModelInfo(m: Record<string, unknown>, seen: Set<string>): RemoteModel | undefined {
+function parseModelInfo(
+  m: Record<string, unknown>,
+  seen: Set<string>,
+  keepDateSuffix = false,
+): RemoteModel | undefined {
+  if (m['enable'] === false || m['display_enabled'] === false) return undefined
   const rawId = m['model_id']
   if (typeof rawId !== 'string' || rawId.length === 0) return undefined
-  const id = normalizeModelId(rawId)
+  const id = keepDateSuffix ? rawId : normalizeModelId(rawId)
   // 过滤视觉（VL）多模态模型
   // id 含 -VL- 或以 -VL 结尾（如 Qwen3-VL-235B），上下文小、不支持工具调用，
   // 不适合当 agent 主模型，从列表隐藏；只通过 analyzeImage 等工具间接调用。
   if (id.includes('-VL-') || id.endsWith('-VL')) return undefined
   const rawName = m['model_name']
-  const name = typeof rawName === 'string' && rawName.length > 0 ? normalizeModelId(rawName) : id
+  const name = typeof rawName === 'string' && rawName.length > 0
+    ? (keepDateSuffix ? rawName : normalizeModelId(rawName))
+    : id
   if (seen.has(id)) return undefined
   seen.add(id)
-  return { id, name }
+  const rawCw = m['context_window']
+  const contextWindow = typeof rawCw === 'number' && Number.isFinite(rawCw) && rawCw > 0
+    ? rawCw
+    : undefined
+  return contextWindow !== undefined ? { id, name, contextWindow } : { id, name }
 }
 
 /** 从 JSON 响应中沿路径指针取数组。 */
@@ -212,7 +225,7 @@ export async function fetchCodeArtsRemoteModels(
     if (arr !== undefined) {
       for (const item of arr) {
         if (typeof item === 'object' && item !== null) {
-          const mi = parseModelInfo(item as Record<string, unknown>, seen)
+          const mi = parseModelInfo(item as Record<string, unknown>, seen, true)
           if (mi) models.push(mi)
         }
       }

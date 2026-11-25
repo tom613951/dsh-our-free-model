@@ -51,7 +51,7 @@ const DEFAULT_MODELS: readonly string[] = [
   'glm-5.3-flash',
   'openpangu-2.0-flash', 'openpangu-2.0-pro',
   'deepseek-v4-flash', 'deepseek-v4-pro',
-  'deepseek-v4.1-flash',
+  'deepseek-v4.1-flash', 'deepseek-v4.1-flash-1017',
 ]
 
 /**
@@ -61,7 +61,8 @@ const DEFAULT_MODELS: readonly string[] = [
  * - deepseek-v4-flash / deepseek-v4-pro：1048576（1M，UI 标注）。
  * - deepseek-v4.1-flash：1000000（对齐 IDE 下发的 inferhub-provider 模型配置，
  *   2026-09 kernel 日志；对齐 deveco-code-rust fb1b4a2）。
- * - 其余模型未公开上下文容量，留 undefined 让后端默认裁剪。
+ * - deepseek-v4.1-flash-1017：1048576（对齐 /v1/model/builtin context_window 实测）。
+ * - 远端 /v1/model/builtin 下发 context_window 时优先采用远端值，此表作兜底。
  */
 const CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
   ['GLM-5.2', 202752],
@@ -69,6 +70,7 @@ const CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
   ['deepseek-v4-flash', 1048576],
   ['deepseek-v4-pro', 1048576],
   ['deepseek-v4.1-flash', 1_000_000],
+  ['deepseek-v4.1-flash-1017', 1_048_576],
 ])
 
 export interface CodeArtsAdapterOptions {
@@ -76,7 +78,7 @@ export interface CodeArtsAdapterOptions {
   resolveCredential: () => Promise<CodeArtsCredential | undefined>
   refresh: () => Promise<void>
   /** 动态拉取远端模型列表；失败时调用方回退到静态列表。 */
-  fetchRemoteModels?: () => Promise<Array<{ id: string; name: string }>>
+  fetchRemoteModels?: () => Promise<Array<{ id: string; name: string; contextWindow?: number }>>
   fetchImpl?: typeof fetch
   chatId?: string
   sessionId?: string
@@ -905,7 +907,7 @@ export class CodeArtsAdapter extends LlmAdapter {
   }
 
   /** 动态模型缓存（首次 listModels 成功后填充）。 */
-  private remoteModels: Array<{ id: string; name: string }> | undefined
+  private remoteModels: Array<{ id: string; name: string; contextWindow?: number }> | undefined
 
   /**
    * 目录加载闸门：并发去重 + 失败冷却。
@@ -984,7 +986,7 @@ export class CodeArtsAdapter extends LlmAdapter {
     await this.ensureRemoteModels()
     const remoteModel = this.remoteModels?.find((m) => m.id === model)
     const name = remoteModel?.name ?? model
-    const contextWindow = CONTEXT_WINDOWS.get(model)
+    const contextWindow = remoteModel?.contextWindow ?? CONTEXT_WINDOWS.get(model)
     const resolved: LlmResolvedModelInfo = { provider, id: model, name }
     if (contextWindow !== undefined) resolved.context = { contextWindow }
     // 思考开关（实测，2026-09-29）：本网关**唯一**真正生效的思考控制是

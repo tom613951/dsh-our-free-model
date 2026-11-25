@@ -57,6 +57,7 @@ import {
   fetchCodeArtsRemoteModels,
   saveModelsCache,
   setMemoryCache,
+  type RemoteModel,
 } from './models.js'
 
 /**
@@ -522,7 +523,7 @@ export class CodeArtsAuth extends Service {
    * 华为云账号体系下发同一份目录），取第一个能解析出 AK/SK 的账号即可，
    * 无需为每个账号各拉一次。
    */
-  async refreshModels(pool: AccountPool): Promise<Array<{ id: string; name: string }>> {
+  async refreshModels(pool: AccountPool): Promise<RemoteModel[]> {
     if (!this.active) return []
     const credential = await this.firstUsableCredential(pool)
     if (credential === undefined) return []

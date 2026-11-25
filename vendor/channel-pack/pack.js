@@ -33443,16 +33443,19 @@ function normalizeModelId(id) {
   }
   return id;
 }
-function parseModelInfo(m, seen) {
+function parseModelInfo(m, seen, keepDateSuffix = false) {
+  if (m["enable"] === false || m["display_enabled"] === false) return void 0;
   const rawId = m["model_id"];
   if (typeof rawId !== "string" || rawId.length === 0) return void 0;
-  const id = normalizeModelId(rawId);
+  const id = keepDateSuffix ? rawId : normalizeModelId(rawId);
   if (id.includes("-VL-") || id.endsWith("-VL")) return void 0;
   const rawName = m["model_name"];
-  const name2 = typeof rawName === "string" && rawName.length > 0 ? normalizeModelId(rawName) : id;
+  const name2 = typeof rawName === "string" && rawName.length > 0 ? keepDateSuffix ? rawName : normalizeModelId(rawName) : id;
   if (seen.has(id)) return void 0;
   seen.add(id);
-  return { id, name: name2 };
+  const rawCw = m["context_window"];
+  const contextWindow = typeof rawCw === "number" && Number.isFinite(rawCw) && rawCw > 0 ? rawCw : void 0;
+  return contextWindow !== void 0 ? { id, name: name2, contextWindow } : { id, name: name2 };
 }
 function extractJsonArray(text, path2) {
   try {
@@ -33522,7 +33525,7 @@ async function fetchCodeArtsRemoteModels(credential, fetcher = directFetch) {
     if (arr !== void 0) {
       for (const item of arr) {
         if (typeof item === "object" && item !== null) {
-          const mi = parseModelInfo(item, seen);
+          const mi = parseModelInfo(item, seen, true);
           if (mi) models.push(mi);
         }
       }
@@ -34799,14 +34802,16 @@ var DEFAULT_MODELS = [
   "openpangu-2.0-pro",
   "deepseek-v4-flash",
   "deepseek-v4-pro",
-  "deepseek-v4.1-flash"
+  "deepseek-v4.1-flash",
+  "deepseek-v4.1-flash-1017"
 ];
 var CONTEXT_WINDOWS = /* @__PURE__ */ new Map([
   ["GLM-5.2", 202752],
   ["glm-5.3-flash", 1048576],
   ["deepseek-v4-flash", 1048576],
   ["deepseek-v4-pro", 1048576],
-  ["deepseek-v4.1-flash", 1e6]
+  ["deepseek-v4.1-flash", 1e6],
+  ["deepseek-v4.1-flash-1017", 1048576]
 ]);
 function contentToText(content) {
   if (typeof content === "string") return content;
@@ -35258,7 +35263,7 @@ var CodeArtsAdapter = class extends LlmAdapter {
     await this.ensureRemoteModels();
     const remoteModel = this.remoteModels?.find((m) => m.id === model);
     const name2 = remoteModel?.name ?? model;
-    const contextWindow = CONTEXT_WINDOWS.get(model);
+    const contextWindow = remoteModel?.contextWindow ?? CONTEXT_WINDOWS.get(model);
     const resolved = { provider, id: model, name: name2 };
     if (contextWindow !== void 0) resolved.context = { contextWindow };
     resolved.reasoning = {
