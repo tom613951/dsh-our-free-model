@@ -36689,7 +36689,8 @@ var WORKBUDDY_FALLBACK_MODELS = [
     defaultReasoningEffort: "high",
     maxOutputTokens: 64e3
   },
-  { id: "deepseek-v4.1-flash", name: "Deepseek-V4.1-Flash", contextWindow: 1e6, supportsImages: true, reasoningEfforts: ["high"], defaultReasoningEffort: "high", maxOutputTokens: 128e3 },
+  // 无后缀 `deepseek-v4.1-flash` 已从 WorkBuddy 国际版服务端下线（仅保留 `-sg`），
+  // 留在本兜底表会导致选择器多出一条无倍率的历史残留项（`Deepseek-V4.1-Flash`），故移除。
   {
     // 2026-09 补录：新加坡区的同代模型（-sg 后缀），远端下发且实测能看图。
     id: "deepseek-v4.1-flash-sg",
