@@ -40493,15 +40493,18 @@ var QODER_FALLBACK_MODELS = [
     supportsDisable: true
   },
   {
-    // 限时免费活动模型（国际版专有，0.0x 免费额度；与 qoder2api-hub ef8e53e 对齐）。
-    id: "HungerG",
+    // 限时免费活动模型 HungerG（2026-11-26 实测 `/algo/api/v2/model/list` app/ide 目录真实 key=`hmodel`；
+    // 传展示名 `HungerG` 会触发国际版 112 pricingUrl 拒绝、CN 静默回落 auto）。
+    id: "hmodel",
     name: "HungerG",
     contextWindow: 1e6,
     supportsImage: true,
     supportsThinking: true,
     isFree: true,
     priceFactor: 0,
-    efforts: ["low", "medium", "high", "max"],
+    originalPriceFactor: 0,
+    efforts: ["high", "max", "low"],
+    defaultEffort: "max",
     supportsDisable: true
   },
   // ⚠️ 这两个模型目录里**只有 `disabled` + `enabled.is_default`，没有 `efforts`**
@@ -40641,6 +40644,20 @@ var QODER_CN_FALLBACK_MODELS = [
     originalPriceFactor: 0.1,
     efforts: ["xhigh", "low", "medium"],
     defaultEffort: "medium",
+    supportsDisable: true
+  },
+  {
+    // 限时免费活动模型 HungerG（2026-11-26 实测 CN `/algo/api/v2/model/list` app/ide 目录真实 key=`hmodel`，0.0x 免费）。
+    id: "hmodel",
+    name: "HungerG",
+    contextWindow: 1e6,
+    supportsImage: true,
+    supportsThinking: true,
+    isFree: true,
+    priceFactor: 0,
+    originalPriceFactor: 0,
+    efforts: ["high", "max", "low"],
+    defaultEffort: "max",
     supportsDisable: true
   },
   {
@@ -41654,7 +41671,7 @@ var QoderAdapter = class extends LlmAdapter4 {
           //
           // 源码依据：`MPi(A) { return A === 'sec_scan' ? 'security' : 'default' }`
           // —— 服务端按 `business.type` 选路由池，缺字段会走异常分支。
-          business: { type: "agent" }
+          business: { type: "agent", model_key: options.model }
         });
       } finally {
         client.dispose();

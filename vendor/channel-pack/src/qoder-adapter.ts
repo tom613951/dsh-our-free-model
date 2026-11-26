@@ -803,7 +803,7 @@ export class QoderAdapter extends LlmAdapter {
           //
           // 源码依据：`MPi(A) { return A === 'sec_scan' ? 'security' : 'default' }`
           // —— 服务端按 `business.type` 选路由池，缺字段会走异常分支。
-          business: { type: 'agent' },
+          business: { type: 'agent', model_key: options.model },
         })
       } finally {
         client.dispose()

@@ -348,22 +348,42 @@ try {
   }
   assert.ok(QODER_CAMPAIGN_FAILURE_CN.RISK_BLOCKED)
 
-  // 6. HungerG intl-only free model
-  const intlHungerG = QODER.fallbackModels.find((m) => m.id === 'HungerG')
-  assert.ok(intlHungerG !== undefined, 'QODER.fallbackModels must include HungerG')
-  assert.equal(intlHungerG.isFree, true)
-  assert.equal(intlHungerG.priceFactor, 0)
-  assert.equal(qoderDisplayName(intlHungerG), 'HungerG · 免费')
+  // 6. HungerG (official key: hmodel) on both QODER & QODER_CN
+  const intlHmodel = QODER.fallbackModels.find((m) => m.id === 'hmodel')
+  assert.ok(intlHmodel !== undefined, 'QODER.fallbackModels must include hmodel')
+  assert.equal(intlHmodel.name, 'HungerG')
+  assert.equal(intlHmodel.isFree, true)
+  assert.equal(intlHmodel.priceFactor, 0)
+  assert.deepEqual(intlHmodel.efforts, ['high', 'max', 'low'])
+  assert.equal(intlHmodel.defaultEffort, 'max')
+  assert.equal(intlHmodel.supportsDisable, true)
+  assert.equal(qoderDisplayName(intlHmodel), 'HungerG · 免费')
+
+  const cnHmodel = QODER_CN.fallbackModels.find((m) => m.id === 'hmodel')
+  assert.ok(cnHmodel !== undefined, 'QODER_CN.fallbackModels must include hmodel')
+  assert.equal(cnHmodel.name, 'HungerG')
+  assert.equal(cnHmodel.isFree, true)
+  assert.equal(cnHmodel.priceFactor, 0)
+  assert.deepEqual(cnHmodel.efforts, ['high', 'max', 'low'])
+  assert.equal(cnHmodel.defaultEffort, 'max')
+  assert.equal(cnHmodel.supportsDisable, true)
+  assert.equal(qoderDisplayName(cnHmodel), 'HungerG · 免费')
+
+  assert.equal(
+    QODER.fallbackModels.some((m) => m.id === 'HungerG'),
+    false,
+    'QODER.fallbackModels must NOT use wrong key id=HungerG',
+  )
   assert.equal(
     QODER_CN.fallbackModels.some((m) => m.id === 'HungerG'),
     false,
-    'QODER_CN.fallbackModels must NOT include HungerG',
+    'QODER_CN.fallbackModels must NOT use wrong key id=HungerG',
   )
 
   // 7. Rebuilt pack.js contains required markers
   const packPath = path.join(rootDir, 'vendor/channel-pack/pack.js')
   const packText = fs.readFileSync(packPath, 'utf8')
-  for (const marker of ['scanLongBase64Literals', 'runtimeInfoEnvironmentFor', 'QODER_CAMPAIGN_FAILURE_CN', 'HungerG']) {
+  for (const marker of ['scanLongBase64Literals', 'runtimeInfoEnvironmentFor', 'QODER_CAMPAIGN_FAILURE_CN', 'hmodel', 'HungerG', 'model_key']) {
     assert.equal(packText.includes(marker), true, `pack.js missing marker: ${marker}`)
   }
 

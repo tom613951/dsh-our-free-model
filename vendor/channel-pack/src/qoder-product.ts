@@ -384,9 +384,10 @@ const QODER_FALLBACK_MODELS: readonly QoderFallbackModel[] = [
     isFree: true, priceFactor: 0, originalPriceFactor: 0.1, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true,
   },
   {
-    // 限时免费活动模型（国际版专有，0.0x 免费额度；与 qoder2api-hub ef8e53e 对齐）。
-    id: 'HungerG', name: 'HungerG', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
-    isFree: true, priceFactor: 0, efforts: ['low', 'medium', 'high', 'max'], supportsDisable: true,
+    // 限时免费活动模型 HungerG（2026-11-26 实测 `/algo/api/v2/model/list` app/ide 目录真实 key=`hmodel`；
+    // 传展示名 `HungerG` 会触发国际版 112 pricingUrl 拒绝、CN 静默回落 auto）。
+    id: 'hmodel', name: 'HungerG', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
+    isFree: true, priceFactor: 0, originalPriceFactor: 0, efforts: ['high', 'max', 'low'], defaultEffort: 'max', supportsDisable: true,
   },
   // ⚠️ 这两个模型目录里**只有 `disabled` + `enabled.is_default`，没有 `efforts`**
   // —— 即官方只提供「关闭思考」一个选项（用户 2026-09-28 确认：
@@ -520,6 +521,11 @@ const QODER_CN_FALLBACK_MODELS: readonly QoderFallbackModel[] = [
     // 越界时服务端回 `Range of input length should be [1, 983616]`）。填 1M。
     id: 'qfmodel', name: 'Qwen3.8-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
     isFree: true, priceFactor: 0, originalPriceFactor: 0.1, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true,
+  },
+  {
+    // 限时免费活动模型 HungerG（2026-11-26 实测 CN `/algo/api/v2/model/list` app/ide 目录真实 key=`hmodel`，0.0x 免费）。
+    id: 'hmodel', name: 'HungerG', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
+    isFree: true, priceFactor: 0, originalPriceFactor: 0, efforts: ['high', 'max', 'low'], defaultEffort: 'max', supportsDisable: true,
   },
   {
     // ⚠️ **没有 `efforts`，只有「关闭思考」**（见本表前的口径注释）。
