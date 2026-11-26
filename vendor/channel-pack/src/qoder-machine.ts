@@ -69,6 +69,11 @@ import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import {
+  ensureQoderUmidInstalled,
+  hasInstalledUmidBinary,
+  resolveDefaultUmidDir,
+} from './qoder-umid-installer.js'
 
 /**
  * `runtime-info.exe` 的单次超时（毫秒）。
@@ -88,16 +93,21 @@ export interface QoderMachineIdentity {
 }
 
 /**
- * 缓存解析结果。
+ * 缓存解析结果，**按 `environment` 分桶**（`'0'` = 中国版 / `'3'` = 国际版）。
  *
- * - `undefined` = 尚未解析；
- * - `null` = 已解析过但**拿不到**（不重复读盘）；
+ * - 键不存在 = 该环境尚未解析；
+ * - `null` = 该环境已解析过但**拿不到**（不重复读盘）；
  * - 对象 = 解析成功。
+ *
+ * ⚠️ **不能只用一个全局变量**（真实缺陷）：身份**随 `environment` 变化**
+ * （见 {@link runtimeInfoEnvironmentFor}），而国际版与中国版会在**同一进程**
+ * 里先后发请求（用户同时挂两个 Qoder 账号）。单桶缓存会让后一个产品复用前一个
+ * 产品的身份 —— 症状正是「某个产品永远看不到可领活动」。
  *
  * 用模块级缓存是因为该值要参与**每次**积分请求的头构造，而文件读取是同步
  * IO；缓存后仅在首次调用时有代价。
  */
-let cached: QoderMachineIdentity | null | undefined
+const cachedByEnv = new Map<string, QoderMachineIdentity | null>()
 
 /**
  * `machine_token.json` 的候选路径。
@@ -210,23 +220,26 @@ function parseFile(path: string): QoderMachineIdentity | undefined {
  */
 export function resolveQoderMachineIdentity(
   forceExecutable?: string,
+  productId?: string,
 ): QoderMachineIdentity | undefined {
+  const env = runtimeInfoEnvironmentFor(productId)
+  const cached = cachedByEnv.get(env)
   if (cached !== undefined) return cached ?? undefined
   // 主路径：实时生成
-  const live = readFromRuntimeInfo(forceExecutable)
+  const live = readFromRuntimeInfo(forceExecutable, env)
   if (live !== undefined) {
-    cached = live
+    cachedByEnv.set(env, live)
     return live
   }
   // 退路：磁盘缓存（可能陈旧，但聊胜于无）
   for (const path of candidatePaths()) {
     const identity = parseFile(path)
     if (identity !== undefined) {
-      cached = identity
+      cachedByEnv.set(env, identity)
       return identity
     }
   }
-  cached = null
+  cachedByEnv.set(env, null)
   return undefined
 }
 
@@ -239,21 +252,40 @@ export function resolveQoderMachineIdentity(
  */
 export async function resolveQoderMachineIdentityAsync(
   forceExecutable?: string,
+  productId?: string,
 ): Promise<QoderMachineIdentity | undefined> {
+  const env = runtimeInfoEnvironmentFor(productId)
+  const cached = cachedByEnv.get(env)
   if (cached !== undefined) return cached ?? undefined
-  const live = await readFromRuntimeInfoAsync(forceExecutable)
+  let live = await readFromRuntimeInfoAsync(forceExecutable, env)
+  // 未安装桌面端（也未被显式指定/禁用）时才尝试自动解包官方 CLI 包里的
+  // UMID 二进制 —— 见 `qoder-umid-installer.ts`。以下任一情况都**不**去联网：
+  // ① 调用方给了显式路径（测试/自定义安装）；② 环境里显式指定了
+  // `QODER_RUNTIME_INFO`（哪怕指向不存在的路径，语义就是「别自己找」）；
+  // ③ `QODER_AUTO_INSTALL_UMID=0`（用户主动关闭）；
+  // ④ 有 channel-pack 状态目录（托管环境由上层管理产物，不在此处下载）。
+  if (
+    live === undefined &&
+    forceExecutable === undefined &&
+    !(process.env.QODER_RUNTIME_INFO !== undefined && process.env.QODER_RUNTIME_INFO.length > 0) &&
+    process.env.QODER_AUTO_INSTALL_UMID !== '0' &&
+    !(process.env.DSH_CHANNEL_PACK_STATE_DIR !== undefined && process.env.DSH_CHANNEL_PACK_STATE_DIR.length > 0)
+  ) {
+    const installedExe = await ensureQoderUmidInstalled()
+    if (installedExe !== undefined) live = await readFromRuntimeInfoAsync(installedExe, env)
+  }
   if (live !== undefined) {
-    cached = live
+    cachedByEnv.set(env, live)
     return live
   }
   for (const path of candidatePaths()) {
     const identity = parseFile(path)
     if (identity !== undefined) {
-      cached = identity
+      cachedByEnv.set(env, identity)
       return identity
     }
   }
-  cached = null
+  cachedByEnv.set(env, null)
   return undefined
 }
 
@@ -289,8 +321,10 @@ const QODER_DATA_DIR_NAMES: readonly string[] = ['.qoder', '.qoder-cn']
 export function findRuntimeInfoExecutable(
   home: string,
   dataDirNames: readonly string[] = QODER_DATA_DIR_NAMES,
+  extraInstallRoots?: readonly string[],
+  platform: NodeJS.Platform = process.platform,
 ): string | undefined {
-  const exeName = process.platform === 'win32' ? 'runtime-info.exe' : 'runtime-info'
+  const exeName = platform === 'win32' ? 'runtime-info.exe' : 'runtime-info'
   for (const dirName of dataDirNames) {
     const binDir = join(home, dirName, '.bin')
     let entries: string[]
@@ -305,16 +339,48 @@ export function findRuntimeInfoExecutable(
     const exe = join(binDir, dir, exeName)
     if (existsSync(exe)) return exe
   }
+
+  // 桌面端安装器还会把 UMID 放在 `<LOCALAPPDATA>/Programs/<产品>/resources/umid`
+  // —— 那是**用户实际安装**的那份（与 `<home>/.qoder/.bin/umid-*` 的临时解包
+  // 不同，用户可能只有这一份）。win32 上同样要求同目录有 `sgsdk.dll`，
+  // 否则 spawn 必然因缺模块失败。
+  const roots = extraInstallRoots ?? (platform === 'win32' ? windowsUmidInstallRoots() : [])
+  for (const root of roots) {
+    const exe = join(root, exeName)
+    if (!existsSync(exe)) continue
+    if (platform === 'win32' && !existsSync(join(root, 'sgsdk.dll'))) continue
+    return exe
+  }
   return undefined
+}
+
+/**
+ * Windows 桌面端的 UMID 安装根目录（`%LOCALAPPDATA%\Programs\...`）。
+ *
+ * 列两个产品名（`Qoder` / `Qoder CN`）：实测两者 `runtime-info.exe` 的 SHA256
+ * 相同，只装其中一个的用户也应命中。
+ */
+function windowsUmidInstallRoots(): readonly string[] {
+  const localAppData = process.env.LOCALAPPDATA
+  if (localAppData === undefined || localAppData.length === 0) return []
+  return [
+    join(localAppData, 'Programs', 'Qoder', 'resources', 'umid'),
+    join(localAppData, 'Programs', 'Qoder CN', 'resources', 'umid'),
+  ]
 }
 
 /**
  * 定位本机 `runtime-info.exe`（生产入口）。
  *
+ * 顺序：
+ * 1. `override` / `QODER_RUNTIME_INFO`：**显式指定优先且不落空**（指向不存在的
+ *    路径即等价于「未安装」，不再往下找 —— 单测正是靠这一点隔离开发机环境）；
+ * 2. 本插件自动解包出来的目录（见 `qoder-umid-installer.ts`，纯插件用户的主路径）；
+ * 3. 本机桌面端的 `umid`（`.bin/umid-*` / `resources/umid`）。
+ *
  * ⚠️ `QODER_RUNTIME_INFO` 可覆盖（**供单测隔离**：默认会真的 spawn 开发机上
  * 的可执行文件，单测必须能把它指到不存在的路径以强制走磁盘缓存退路，
  * 否则用例结果随「开发机是否装了 Qoder 桌面端」而变，且每次跑 3.8 秒）。
- * 指向不存在的路径即等价于「未安装」。
  */
 function locateRuntimeInfo(override?: string): string | undefined {
   const fromEnv = process.env.QODER_RUNTIME_INFO
@@ -323,6 +389,8 @@ function locateRuntimeInfo(override?: string): string | undefined {
     // 显式指定的路径必须真实存在，否则视为「没有可执行文件」而走退路。
     return existsSync(candidate) ? candidate : undefined
   }
+  const extracted = hasInstalledUmidBinary(resolveDefaultUmidDir())
+  if (extracted !== undefined) return extracted
   return findRuntimeInfoExecutable(homedir())
 }
 
@@ -362,19 +430,35 @@ function locateRuntimeInfo(override?: string): string | undefined {
  *
  * 取 `3`（对应源码的 `'global'` 分支）：本机 IDE 抓包实测用的就是它。
  */
+export type QoderUmidProductId = 'qoder' | 'qodercn'
+
+/**
+ * 按产品返回 `runtime-info` 的 `environment` 参数：
+ * 中国版（`qodercn`）为 `'0'`（ONLINE），国际版（`qoder`）为 `'3'`（US_ONLINE）。
+ */
+export function runtimeInfoEnvironmentFor(productId?: string): '0' | '3' {
+  return productId === 'qodercn' ? '0' : '3'
+}
+
 const RUNTIME_INFO_ENVIRONMENT = '3'
 
 /**
  * 构造 `runtime-info.exe` 的参数。
  *
- * 顺序**必须**是 `[environment, '--account-stdin']` —— 与 asar 源码一致。
+ * `win32`/`darwin` 顺序**必须**是 `[environment, '--account-stdin']`，`linux` 为
+ * `[environment]` —— 与 asar 源码一致。
  *
  * ⚠️ **导出仅供测试**：`runtime-info-args` 的回归用例直接断言这个数组，
  * 因为单测路径刻意禁用了真实 spawn（见 `vitest.config.ts`），
  * 若不可导出就**无法用单测锁住参数形态** —— 而漏参数正是本函数出过的缺陷。
  */
-export function runtimeInfoArgs(): readonly string[] {
-  return [RUNTIME_INFO_ENVIRONMENT, '--account-stdin']
+export function runtimeInfoArgs(
+  environment: string = RUNTIME_INFO_ENVIRONMENT,
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] {
+  return platform === 'win32' || platform === 'darwin'
+    ? [environment, '--account-stdin']
+    : [environment]
 }
 
 /**
@@ -414,11 +498,14 @@ function parseRuntimeInfoOutput(out: string): QoderMachineIdentity | undefined {
  * ⚠️ 实测约 **3.8 秒**，生产路径请用异步版（见
  * {@link resolveQoderMachineIdentityAsync}），否则会阻塞事件循环。
  */
-function readFromRuntimeInfo(override?: string): QoderMachineIdentity | undefined {
+function readFromRuntimeInfo(
+  override?: string,
+  environment: string = RUNTIME_INFO_ENVIRONMENT,
+): QoderMachineIdentity | undefined {
   const exe = locateRuntimeInfo(override)
   if (exe === undefined) return undefined
   try {
-    const out = execFileSync(exe, [...runtimeInfoArgs()], {
+    const out = execFileSync(exe, [...runtimeInfoArgs(environment)], {
       input: JSON.stringify({ account: '' }),
       encoding: 'utf8',
       timeout: RUNTIME_INFO_TIMEOUT_MS,
@@ -432,7 +519,10 @@ function readFromRuntimeInfo(override?: string): QoderMachineIdentity | undefine
 }
 
 /** 异步实时生成身份（生产路径）。 */
-async function readFromRuntimeInfoAsync(override?: string): Promise<QoderMachineIdentity | undefined> {
+async function readFromRuntimeInfoAsync(
+  override?: string,
+  environment: string = RUNTIME_INFO_ENVIRONMENT,
+): Promise<QoderMachineIdentity | undefined> {
   const exe = locateRuntimeInfo(override)
   if (exe === undefined) return undefined
   return await new Promise<QoderMachineIdentity | undefined>((resolve) => {
@@ -444,7 +534,7 @@ async function readFromRuntimeInfoAsync(override?: string): Promise<QoderMachine
     }
     let child
     try {
-      child = spawn(exe, [...runtimeInfoArgs()], { windowsHide: true })
+      child = spawn(exe, [...runtimeInfoArgs(environment)], { windowsHide: true })
     } catch {
       done(undefined)
       return
@@ -472,7 +562,7 @@ async function readFromRuntimeInfoAsync(override?: string): Promise<QoderMachine
 
 /** 仅供测试：清空缓存（生产代码不需要）。 */
 export function resetQoderMachineIdentityCache(): void {
-  cached = undefined
+  cachedByEnv.clear()
 }
 
 /**
@@ -484,8 +574,11 @@ export function resetQoderMachineIdentityCache(): void {
  * 同步版：只在身份**已缓存**时才会命中；否则请用
  * {@link withQoderMachineHeadersAsync}。
  */
-export function withQoderMachineHeaders(headers: Record<string, string>): Record<string, string> {
-  const identity = resolveQoderMachineIdentity()
+export function withQoderMachineHeaders(
+  headers: Record<string, string>,
+  productId?: string,
+): Record<string, string> {
+  const identity = resolveQoderMachineIdentity(undefined, productId)
   if (identity === undefined) return headers
   return {
     ...headers,
@@ -499,8 +592,9 @@ export function withQoderMachineHeaders(headers: Record<string, string>): Record
 export async function withQoderMachineHeadersAsync(
   headers: Record<string, string>,
   forceExecutable?: string,
+  productId?: string,
 ): Promise<Record<string, string>> {
-  const identity = await resolveQoderMachineIdentityAsync(forceExecutable)
+  const identity = await resolveQoderMachineIdentityAsync(forceExecutable, productId)
   if (identity === undefined) return headers
   return {
     ...headers,

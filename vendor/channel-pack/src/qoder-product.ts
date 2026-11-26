@@ -383,6 +383,11 @@ const QODER_FALLBACK_MODELS: readonly QoderFallbackModel[] = [
     id: 'qfmodel', name: 'Qwen3.8-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
     isFree: true, priceFactor: 0, originalPriceFactor: 0.1, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true,
   },
+  {
+    // 限时免费活动模型（国际版专有，0.0x 免费额度；与 qoder2api-hub ef8e53e 对齐）。
+    id: 'HungerG', name: 'HungerG', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
+    isFree: true, priceFactor: 0, efforts: ['low', 'medium', 'high', 'max'], supportsDisable: true,
+  },
   // ⚠️ 这两个模型目录里**只有 `disabled` + `enabled.is_default`，没有 `efforts`**
   // —— 即官方只提供「关闭思考」一个选项（用户 2026-09-28 确认：
   // 「上面两个没有思考档位就是关闭的意思」）。故 `efforts` 留空，

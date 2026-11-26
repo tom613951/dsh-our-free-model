@@ -40492,6 +40492,18 @@ var QODER_FALLBACK_MODELS = [
     defaultEffort: "medium",
     supportsDisable: true
   },
+  {
+    // 限时免费活动模型（国际版专有，0.0x 免费额度；与 qoder2api-hub ef8e53e 对齐）。
+    id: "HungerG",
+    name: "HungerG",
+    contextWindow: 1e6,
+    supportsImage: true,
+    supportsThinking: true,
+    isFree: true,
+    priceFactor: 0,
+    efforts: ["low", "medium", "high", "max"],
+    supportsDisable: true
+  },
   // ⚠️ 这两个模型目录里**只有 `disabled` + `enabled.is_default`，没有 `efforts`**
   // —— 即官方只提供「关闭思考」一个选项（用户 2026-09-28 确认：
   // 「上面两个没有思考档位就是关闭的意思」）。故 `efforts` 留空，
@@ -43054,8 +43066,8 @@ function traeCacheReadTokens(usage) {
   if (typeof anthropic === "number" && anthropic > 0) return anthropic;
   const details = usage.prompt_tokens_details;
   if (details != null && typeof details === "object") {
-    const cached2 = details.cached_tokens;
-    if (typeof cached2 === "number" && cached2 > 0) return cached2;
+    const cached = details.cached_tokens;
+    if (typeof cached === "number" && cached > 0) return cached;
   }
   const openai = usage.prompt_cache_hit_tokens;
   if (typeof openai === "number" && openai > 0) return openai;
@@ -47799,14 +47811,14 @@ async function prepareKey(entry, key, usage) {
   }
   cache3 ||= /* @__PURE__ */ new WeakMap();
   const cacheKey = key;
-  let cached2 = cache3.get(cacheKey);
-  if (cached2?.[alg])
-    return cached2[alg];
-  if (cached2 || cache3.set(cacheKey, cached2 = {}), keyObject && typeof keyObject.toCryptoKey == "function") {
+  let cached = cache3.get(cacheKey);
+  if (cached?.[alg])
+    return cached[alg];
+  if (cached || cache3.set(cacheKey, cached = {}), keyObject && typeof keyObject.toCryptoKey == "function") {
     const isPublic = keyObject.type === "public", crv = nist[keyObject.asymmetricKeyDetails?.namedCurve], params = entry.resolve?.({ crv, asymmetricKeyType: keyObject.asymmetricKeyType }) ?? entry.subtle;
-    return cached2[alg] = keyObject.toCryptoKey(params, isPublic, entry.usages[isPublic ? 0 : 1]);
+    return cached[alg] = keyObject.toCryptoKey(params, isPublic, entry.usages[isPublic ? 0 : 1]);
   }
-  return normalized ??= keyObject.export({ format: "jwk" }), normalized.alg = alg, cached2[alg] = await jwkToKey(entry, normalized);
+  return normalized ??= keyObject.export({ format: "jwk" }), normalized.alg = alg, cached[alg] = await jwkToKey(entry, normalized);
 }
 var cache3;
 var nist = {
@@ -51785,9 +51797,9 @@ var TraeAuth = class _TraeAuth extends Service6 {
    * 才记录。
    */
   async fetchModels(pool) {
-    const cached2 = this.modelsCache;
-    if (cached2 !== void 0 && Date.now() - cached2.at < _TraeAuth.MODELS_CACHE_TTL_MS) {
-      return cached2.models;
+    const cached = this.modelsCache;
+    if (cached !== void 0 && Date.now() - cached.at < _TraeAuth.MODELS_CACHE_TTL_MS) {
+      return cached.models;
     }
     const models = await this.fetchModelsUncached(pool);
     this.modelsCache = { models, at: Date.now() };
@@ -53998,10 +54010,10 @@ var LoomyBalanceSelector = class {
    */
   async balanceOf(account) {
     const now = this.deps.now?.() ?? Date.now();
-    const cached2 = this.cache.get(account.id);
-    if (cached2 !== void 0) {
-      const ttl = cached2.value.ok ? this.deps.ttlMs ?? LOOMY_BALANCE_CACHE_TTL_MS : this.deps.errorTtlMs ?? LOOMY_BALANCE_ERROR_CACHE_TTL_MS;
-      if (now - cached2.at < ttl) return cached2.value;
+    const cached = this.cache.get(account.id);
+    if (cached !== void 0) {
+      const ttl = cached.value.ok ? this.deps.ttlMs ?? LOOMY_BALANCE_CACHE_TTL_MS : this.deps.errorTtlMs ?? LOOMY_BALANCE_ERROR_CACHE_TTL_MS;
+      if (now - cached.at < ttl) return cached.value;
     }
     const value = await this.fetchBalance(account);
     this.cache.set(account.id, { at: now, value });
@@ -58137,9 +58149,9 @@ function buildEnvironmentSection(options) {
 }
 function isGitRepo(cwd) {
   try {
-    const { existsSync: existsSync12 } = __require("node:fs");
-    const { join: join13 } = __require("node:path");
-    return existsSync12(join13(cwd, ".git"));
+    const { existsSync: existsSync13 } = __require("node:fs");
+    const { join: join14 } = __require("node:path");
+    return existsSync13(join14(cwd, ".git"));
   } catch {
     return false;
   }
@@ -61517,8 +61529,8 @@ async function fetchGeminiCreditBalance(credential, _product = GEMINI, options =
   if (token === "") return { balance: null, error: GEMINI_UNAUTHORIZED_MESSAGE };
   const now = options.now?.() ?? Date.now();
   if (options.force !== true) {
-    const cached2 = cache4.get(token);
-    if (cached2 !== void 0 && now - cached2.at < GEMINI_QUOTA_CACHE_TTL_MS) return cached2.result;
+    const cached = cache4.get(token);
+    if (cached !== void 0 && now - cached.at < GEMINI_QUOTA_CACHE_TTL_MS) return cached.result;
   }
   const result = await requestQuota(credential, options.fetcher ?? fetch);
   cache4.set(token, { at: now, result });
@@ -61609,11 +61621,302 @@ function quotaRejectionHint(text) {
 
 // vendor/channel-pack/src/qoder-machine.ts
 import { execFileSync, spawn as spawn4 } from "node:child_process";
-import { existsSync as existsSync6, readFileSync as readFileSync6, readdirSync } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync7, readdirSync } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join6 } from "node:path";
+
+// vendor/channel-pack/src/qoder-umid-installer.ts
+import { createHash as createHash7 } from "node:crypto";
+import { chmodSync, existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync6, renameSync as renameSync5, unlinkSync, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join5 } from "node:path";
+import { gunzipSync } from "node:zlib";
+var QODERCLI_REGISTRY_URL = "https://registry.npmjs.org/@qoder-ai/qodercli/latest";
+var UMID_BLOB_MIN_LEN = 4e3;
+function resolveDefaultUmidDir() {
+  const override = process.env.QODER_UMID_DIR?.trim();
+  if (override !== void 0 && override.length > 0) return override;
+  const fromEnv = process.env.DSH_HOME?.trim();
+  const baseHome = fromEnv !== void 0 && fromEnv.length > 0 ? fromEnv : join5(homedir3(), ".dsh");
+  return join5(baseHome, "channel-pack", "qoder-umid");
+}
+function hasInstalledUmidBinary(dir, platform = process.platform) {
+  if (platform === "win32") {
+    const exe2 = join5(dir, "runtime-info.exe");
+    const dll = join5(dir, "sgsdk.dll");
+    if (existsSync6(exe2) && existsSync6(dll)) return exe2;
+    return void 0;
+  }
+  const exe = join5(dir, "runtime-info");
+  return existsSync6(exe) ? exe : void 0;
+}
+function isBase64Char(code) {
+  return code >= 48 && code <= 57 || code >= 65 && code <= 90 || code >= 97 && code <= 122 || code === 43 || code === 47 || code === 61;
+}
+function scanLongBase64Literals(source, minLen = UMID_BLOB_MIN_LEN) {
+  const found = [];
+  const length = source.length;
+  let index = 0;
+  while (index < length) {
+    const quote = source.charCodeAt(index);
+    if (quote !== 39 && quote !== 34) {
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < length && isBase64Char(source.charCodeAt(end))) end += 1;
+    if (end < length && source.charCodeAt(end) === quote) {
+      if (end - index - 1 >= minLen) found.push(source.slice(index + 1, end));
+      index = end + 1;
+      continue;
+    }
+    index = end;
+  }
+  return found;
+}
+function readLe16(raw, offset) {
+  return (raw[offset] ?? 0) | (raw[offset + 1] ?? 0) << 8;
+}
+function readLe32(raw, offset) {
+  return ((raw[offset] ?? 0) | (raw[offset + 1] ?? 0) << 8 | (raw[offset + 2] ?? 0) << 16 | (raw[offset + 3] ?? 0) << 24) >>> 0;
+}
+function identifyUmidBlob(raw) {
+  const byte = (offset) => raw[offset] ?? 0;
+  if (raw.length >= 4 && byte(0) === 0 && byte(1) === 97 && byte(2) === 115 && byte(3) === 109) {
+    return "wasm";
+  }
+  if (raw.length >= 20 && byte(0) === 127 && byte(1) === 69 && byte(2) === 76 && byte(3) === 70) {
+    const machine = readLe16(raw, 18);
+    if (machine === 62) return "elf-x64";
+    if (machine === 183) return "elf-arm64";
+    return "unknown";
+  }
+  if (raw.length >= 8 && readLe32(raw, 0) === 4277009103) {
+    const cpuType = readLe32(raw, 4);
+    if (cpuType === 16777223) return "macho-x64";
+    if (cpuType === 16777228) return "macho-arm64";
+    return "unknown";
+  }
+  if (raw.length >= 64 && byte(0) === 77 && byte(1) === 90) {
+    const peOff = readLe32(raw, 60);
+    if (peOff + 24 <= raw.length) {
+      const isPe = byte(peOff) === 80 && byte(peOff + 1) === 69 && byte(peOff + 2) === 0 && byte(peOff + 3) === 0;
+      if (isPe) {
+        const machine = readLe16(raw, peOff + 4);
+        const isDll = (readLe16(raw, peOff + 22) & 8192) !== 0;
+        if (machine === 34404) return isDll ? "pe-x64-dll" : "pe-x64-exe";
+        if (machine === 43620) return isDll ? "pe-arm64-dll" : "pe-arm64-exe";
+      }
+    }
+    return "unknown";
+  }
+  return "unknown";
+}
+function readTarString(header, offset, length) {
+  let end = offset;
+  const limit = offset + length;
+  while (end < limit && (header[end] ?? 0) !== 0) end += 1;
+  let text = "";
+  for (let index = offset; index < end; index += 1) text += String.fromCharCode(header[index] ?? 0);
+  return text.replace(/ +$/, "");
+}
+function extractFileFromTarGz(tgzBuffer, memberPath) {
+  let raw;
+  try {
+    raw = gunzipSync(tgzBuffer);
+  } catch {
+    return void 0;
+  }
+  let offset = 0;
+  while (offset + 512 <= raw.length) {
+    const header = raw.subarray(offset, offset + 512);
+    let zero = true;
+    for (let index = 0; index < 512; index += 1) {
+      if ((header[index] ?? 0) !== 0) {
+        zero = false;
+        break;
+      }
+    }
+    if (zero) return void 0;
+    const name2 = readTarString(header, 0, 100);
+    const prefix = readTarString(header, 345, 155);
+    const sizeText = readTarString(header, 124, 12).trim();
+    const size = sizeText.length > 0 ? Number.parseInt(sizeText, 8) : 0;
+    const safeSize = Number.isFinite(size) && size >= 0 ? size : 0;
+    const dataStart = offset + 512;
+    const dataEnd = dataStart + safeSize;
+    if (dataEnd > raw.length) return void 0;
+    const fullName = prefix.length > 0 ? `${prefix}/${name2}` : name2;
+    if (fullName === memberPath) return raw.subarray(dataStart, dataEnd);
+    offset = dataStart + Math.ceil(safeSize / 512) * 512;
+  }
+  return void 0;
+}
+function pickCandidate(candidates, kind, prefer) {
+  const matched = candidates.filter((candidate) => candidate.kind === kind);
+  if (matched.length === 0) return void 0;
+  const preferred = matched.filter((candidate) => prefer(candidate.data));
+  const pool = preferred.length > 0 ? preferred : matched;
+  return pool.reduce((best, candidate) => candidate.data.length > best.data.length ? candidate : best);
+}
+function writeAtomic(target, data) {
+  const temp = `${target}.tmp-${process.pid}`;
+  writeFileSync6(temp, data);
+  try {
+    renameSync5(temp, target);
+  } catch (error) {
+    try {
+      unlinkSync(temp);
+    } catch {
+    }
+    throw error;
+  }
+}
+function readInstalledVersion(dir) {
+  try {
+    const parsed = JSON.parse(readFileSync6(join5(dir, ".version"), "utf8"));
+    if (typeof parsed === "object" && parsed !== null) {
+      const version = parsed.version;
+      if (typeof version === "string" && version.length > 0) return version;
+    }
+  } catch {
+  }
+  return "unknown";
+}
+function readMetaString(source, ...keys) {
+  let current = source;
+  for (const key of keys) {
+    if (typeof current !== "object" || current === null) return void 0;
+    current = current[key];
+  }
+  return typeof current === "string" && current.length > 0 ? current : void 0;
+}
+var inflight = /* @__PURE__ */ new Map();
+async function installQoderUmid(options = {}) {
+  const destDir = options.destDir ?? resolveDefaultUmidDir();
+  const shareable = options.fetcher === void 0 && options.force !== true;
+  if (!shareable) {
+    return await installQoderUmidInternal(
+      destDir,
+      options.platform ?? process.platform,
+      options.arch ?? process.arch,
+      options.fetcher ?? fetch,
+      options.force === true
+    );
+  }
+  const running2 = inflight.get(destDir);
+  if (running2 !== void 0) return await running2;
+  const task = installQoderUmidInternal(
+    destDir,
+    options.platform ?? process.platform,
+    options.arch ?? process.arch,
+    options.fetcher ?? fetch,
+    options.force === true
+  ).finally(() => {
+    inflight.delete(destDir);
+  });
+  inflight.set(destDir, task);
+  return await task;
+}
+async function installQoderUmidInternal(destDir, platform, arch, fetcher, force) {
+  const installed = hasInstalledUmidBinary(destDir, platform);
+  if (installed !== void 0 && !force) {
+    return {
+      dir: destDir,
+      executablePath: installed,
+      // win32 的 dll 与 exe 是成对的（`hasInstalledUmidBinary` 已确保存在）
+      ...platform === "win32" ? { companionDllPath: join5(destDir, "sgsdk.dll") } : {},
+      version: readInstalledVersion(destDir),
+      alreadyInstalled: true
+    };
+  }
+  let meta;
+  try {
+    const response = await fetcher(QODERCLI_REGISTRY_URL, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(15e3)
+    });
+    if (!response.ok) throw new Error(`registry HTTP ${response.status}`);
+    meta = await response.json();
+  } catch (error) {
+    throw new Error(`\u65E0\u6CD5\u83B7\u53D6 ${QODERCLI_REGISTRY_URL}\uFF1A${error instanceof Error ? error.message : String(error)}`);
+  }
+  const version = readMetaString(meta, "version");
+  const tarball = readMetaString(meta, "dist", "tarball");
+  const integrity = readMetaString(meta, "dist", "integrity");
+  if (version === void 0 || tarball === void 0) {
+    throw new Error("\u5B98\u65B9 CLI \u5305\u5143\u6570\u636E\u7F3A\u5C11 version/dist.tarball");
+  }
+  let tgz;
+  try {
+    const response = await fetcher(tarball, { signal: AbortSignal.timeout(12e4) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    tgz = new Uint8Array(await response.arrayBuffer());
+  } catch (error) {
+    throw new Error(`\u4E0B\u8F7D ${tarball} \u5931\u8D25\uFF1A${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (integrity !== void 0 && integrity.startsWith("sha512-")) {
+    const digest = `sha512-${createHash7("sha512").update(tgz).digest("base64")}`;
+    if (digest !== integrity) {
+      throw new Error(`tarball \u5B8C\u6574\u6027\u6821\u9A8C\u5931\u8D25\uFF08\u671F\u671B ${integrity}\uFF0C\u5B9E\u5F97 ${digest}\uFF09`);
+    }
+  }
+  const runtimeMjs = extractFileFromTarGz(tgz, "package/bundle/qoder-worker-runtime.mjs");
+  if (runtimeMjs === void 0) {
+    throw new Error("\u5B98\u65B9 CLI \u5305\u91CC\u6CA1\u6709 package/bundle/qoder-worker-runtime.mjs");
+  }
+  const candidates = [];
+  for (const literal of scanLongBase64Literals(runtimeMjs.toString("utf8"), UMID_BLOB_MIN_LEN)) {
+    const data = Buffer.from(literal, "base64");
+    candidates.push({ kind: identifyUmidBlob(data), data });
+  }
+  const selections = [];
+  if (platform === "win32") {
+    const isArm = arch === "arm64";
+    const exe = pickCandidate(candidates, isArm ? "pe-arm64-exe" : "pe-x64-exe", (data) => data.length >= 200 * 1024 && data.length <= 2 * 1024 * 1024);
+    const dll = pickCandidate(candidates, isArm ? "pe-arm64-dll" : "pe-x64-dll", (data) => data.length > 2 * 1024 * 1024);
+    if (exe === void 0 || dll === void 0) {
+      throw new Error(`\u5B98\u65B9 CLI \u5305 ${version} \u91CC\u6CA1\u6709\u5339\u914D win32/${arch} \u7684 runtime-info/sgsdk \u4E8C\u8FDB\u5236`);
+    }
+    selections.push({ name: "runtime-info.exe", data: exe.data }, { name: "sgsdk.dll", data: dll.data });
+  } else if (platform === "darwin") {
+    const exe = pickCandidate(candidates, arch === "arm64" ? "macho-arm64" : "macho-x64", () => true);
+    if (exe === void 0) throw new Error(`\u5B98\u65B9 CLI \u5305 ${version} \u91CC\u6CA1\u6709\u5339\u914D darwin/${arch} \u7684 runtime-info \u4E8C\u8FDB\u5236`);
+    selections.push({ name: "runtime-info", data: exe.data });
+  } else {
+    const exe = pickCandidate(candidates, arch === "arm64" ? "elf-arm64" : "elf-x64", () => true);
+    if (exe === void 0) throw new Error(`\u5B98\u65B9 CLI \u5305 ${version} \u91CC\u6CA1\u6709\u5339\u914D ${platform}/${arch} \u7684 runtime-info \u4E8C\u8FDB\u5236`);
+    selections.push({ name: "runtime-info", data: exe.data });
+  }
+  mkdirSync5(destDir, { recursive: true });
+  for (const selection of selections) {
+    writeAtomic(join5(destDir, selection.name), selection.data);
+  }
+  const executablePath = join5(destDir, platform === "win32" ? "runtime-info.exe" : "runtime-info");
+  if (platform !== "win32") {
+    chmodSync(executablePath, 493);
+  }
+  writeAtomic(join5(destDir, ".version"), Buffer.from(JSON.stringify({ version, installedAt: Date.now() }), "utf8"));
+  return {
+    dir: destDir,
+    executablePath,
+    ...platform === "win32" ? { companionDllPath: join5(destDir, "sgsdk.dll") } : {},
+    version,
+    alreadyInstalled: false
+  };
+}
+async function ensureQoderUmidInstalled() {
+  try {
+    const result = await installQoderUmid();
+    return result.executablePath;
+  } catch {
+    return void 0;
+  }
+}
+
+// vendor/channel-pack/src/qoder-machine.ts
 var RUNTIME_INFO_TIMEOUT_MS = 2e4;
-var cached;
+var cachedByEnv = /* @__PURE__ */ new Map();
 function candidatePaths() {
   const override = process.env.QODER_MACHINE_TOKEN_PATH;
   if (override !== void 0 && override.length > 0) return [override];
@@ -61621,20 +61924,20 @@ function candidatePaths() {
   const appData = process.env.APPDATA;
   if (appData !== void 0 && appData.length > 0) {
     for (const dir of ["Qoder", "Qoder CN"]) {
-      paths.push(join5(appData, dir, "SharedClientCache", "cache", "machine_token.json"));
+      paths.push(join6(appData, dir, "SharedClientCache", "cache", "machine_token.json"));
     }
   }
-  const home = homedir3();
+  const home = homedir4();
   for (const dir of ["Qoder", "Qoder CN"]) {
-    paths.push(join5(home, "Library", "Application Support", dir, "SharedClientCache", "cache", "machine_token.json"));
-    paths.push(join5(home, ".config", dir, "SharedClientCache", "cache", "machine_token.json"));
+    paths.push(join6(home, "Library", "Application Support", dir, "SharedClientCache", "cache", "machine_token.json"));
+    paths.push(join6(home, ".config", dir, "SharedClientCache", "cache", "machine_token.json"));
   }
   return paths;
 }
 function parseFile(path2) {
   let raw;
   try {
-    raw = readFileSync6(path2, "utf8");
+    raw = readFileSync7(path2, "utf8");
   } catch {
     return void 0;
   }
@@ -61652,28 +61955,34 @@ function parseFile(path2) {
   if (typeof type !== "string" || type.length === 0) return void 0;
   return { token, type };
 }
-async function resolveQoderMachineIdentityAsync(forceExecutable) {
+async function resolveQoderMachineIdentityAsync(forceExecutable, productId) {
+  const env = runtimeInfoEnvironmentFor(productId);
+  const cached = cachedByEnv.get(env);
   if (cached !== void 0) return cached ?? void 0;
-  const live = await readFromRuntimeInfoAsync(forceExecutable);
+  let live = await readFromRuntimeInfoAsync(forceExecutable, env);
+  if (live === void 0 && forceExecutable === void 0 && !(process.env.QODER_RUNTIME_INFO !== void 0 && process.env.QODER_RUNTIME_INFO.length > 0) && process.env.QODER_AUTO_INSTALL_UMID !== "0" && !(process.env.DSH_CHANNEL_PACK_STATE_DIR !== void 0 && process.env.DSH_CHANNEL_PACK_STATE_DIR.length > 0)) {
+    const installedExe = await ensureQoderUmidInstalled();
+    if (installedExe !== void 0) live = await readFromRuntimeInfoAsync(installedExe, env);
+  }
   if (live !== void 0) {
-    cached = live;
+    cachedByEnv.set(env, live);
     return live;
   }
   for (const path2 of candidatePaths()) {
     const identity = parseFile(path2);
     if (identity !== void 0) {
-      cached = identity;
+      cachedByEnv.set(env, identity);
       return identity;
     }
   }
-  cached = null;
+  cachedByEnv.set(env, null);
   return void 0;
 }
 var QODER_DATA_DIR_NAMES = [".qoder", ".qoder-cn"];
-function findRuntimeInfoExecutable(home, dataDirNames = QODER_DATA_DIR_NAMES) {
-  const exeName = process.platform === "win32" ? "runtime-info.exe" : "runtime-info";
+function findRuntimeInfoExecutable(home, dataDirNames = QODER_DATA_DIR_NAMES, extraInstallRoots, platform = process.platform) {
+  const exeName = platform === "win32" ? "runtime-info.exe" : "runtime-info";
   for (const dirName of dataDirNames) {
-    const binDir = join5(home, dirName, ".bin");
+    const binDir = join6(home, dirName, ".bin");
     let entries;
     try {
       entries = readdirSync(binDir);
@@ -61682,22 +61991,42 @@ function findRuntimeInfoExecutable(home, dataDirNames = QODER_DATA_DIR_NAMES) {
     }
     const dir = entries.find((name2) => name2.startsWith("umid-"));
     if (dir === void 0) continue;
-    const exe = join5(binDir, dir, exeName);
-    if (existsSync6(exe)) return exe;
+    const exe = join6(binDir, dir, exeName);
+    if (existsSync7(exe)) return exe;
+  }
+  const roots = extraInstallRoots ?? (platform === "win32" ? windowsUmidInstallRoots() : []);
+  for (const root of roots) {
+    const exe = join6(root, exeName);
+    if (!existsSync7(exe)) continue;
+    if (platform === "win32" && !existsSync7(join6(root, "sgsdk.dll"))) continue;
+    return exe;
   }
   return void 0;
+}
+function windowsUmidInstallRoots() {
+  const localAppData = process.env.LOCALAPPDATA;
+  if (localAppData === void 0 || localAppData.length === 0) return [];
+  return [
+    join6(localAppData, "Programs", "Qoder", "resources", "umid"),
+    join6(localAppData, "Programs", "Qoder CN", "resources", "umid")
+  ];
 }
 function locateRuntimeInfo(override) {
   const fromEnv = process.env.QODER_RUNTIME_INFO;
   const candidate = override ?? (fromEnv !== void 0 && fromEnv.length > 0 ? fromEnv : void 0);
   if (candidate !== void 0) {
-    return existsSync6(candidate) ? candidate : void 0;
+    return existsSync7(candidate) ? candidate : void 0;
   }
-  return findRuntimeInfoExecutable(homedir3());
+  const extracted = hasInstalledUmidBinary(resolveDefaultUmidDir());
+  if (extracted !== void 0) return extracted;
+  return findRuntimeInfoExecutable(homedir4());
+}
+function runtimeInfoEnvironmentFor(productId) {
+  return productId === "qodercn" ? "0" : "3";
 }
 var RUNTIME_INFO_ENVIRONMENT = "3";
-function runtimeInfoArgs() {
-  return [RUNTIME_INFO_ENVIRONMENT, "--account-stdin"];
+function runtimeInfoArgs(environment = RUNTIME_INFO_ENVIRONMENT, platform = process.platform) {
+  return platform === "win32" || platform === "darwin" ? [environment, "--account-stdin"] : [environment];
 }
 function parseRuntimeInfoOutput(out) {
   const start = out.indexOf("{");
@@ -61716,7 +62045,7 @@ function parseRuntimeInfoOutput(out) {
   if (typeof type !== "string" || type.length === 0) return void 0;
   return { token, type };
 }
-async function readFromRuntimeInfoAsync(override) {
+async function readFromRuntimeInfoAsync(override, environment = RUNTIME_INFO_ENVIRONMENT) {
   const exe = locateRuntimeInfo(override);
   if (exe === void 0) return void 0;
   return await new Promise((resolve2) => {
@@ -61728,7 +62057,7 @@ async function readFromRuntimeInfoAsync(override) {
     };
     let child;
     try {
-      child = spawn4(exe, [...runtimeInfoArgs()], { windowsHide: true });
+      child = spawn4(exe, [...runtimeInfoArgs(environment)], { windowsHide: true });
     } catch {
       done(void 0);
       return;
@@ -61760,8 +62089,8 @@ async function readFromRuntimeInfoAsync(override) {
     child.stdin?.end(JSON.stringify({ account: "" }));
   });
 }
-async function withQoderMachineHeadersAsync(headers, forceExecutable) {
-  const identity = await resolveQoderMachineIdentityAsync(forceExecutable);
+async function withQoderMachineHeadersAsync(headers, forceExecutable, productId) {
+  const identity = await resolveQoderMachineIdentityAsync(forceExecutable, productId);
   if (identity === void 0) return headers;
   return {
     ...headers,
@@ -61805,13 +62134,17 @@ async function fetchQoderUsageRaw(credential, product, fetcher = fetch) {
   }
 }
 async function creditsHeaders(credential, product) {
-  return await withQoderMachineHeadersAsync({
-    Accept: "application/json",
-    Authorization: `Bearer ${qoderBearerToken(credential)}`,
-    // 桌面 app 身份（`'10'`）；服务端据此进入活动下发分支。
-    "Cosy-ClientType": product.sashClientType,
-    "User-Agent": "Qoder"
-  });
+  return await withQoderMachineHeadersAsync(
+    {
+      Accept: "application/json",
+      Authorization: `Bearer ${qoderBearerToken(credential)}`,
+      // 桌面 app 身份（`'10'`）；服务端据此进入活动下发分支。
+      "Cosy-ClientType": product.sashClientType,
+      "User-Agent": "Qoder"
+    },
+    void 0,
+    product.id
+  );
 }
 function readNumber5(source, key) {
   if (typeof source !== "object" || source === null) return void 0;
@@ -61903,12 +62236,14 @@ function parseQoderCampaigns(body) {
     for (const item of raw) {
       const id = readString5(item, "campaignId");
       if (id === void 0) continue;
+      const unavailableReason = readString5(item, "unavailableReason") ?? readString5(item, "unavailable_reason");
       campaigns.push({
         campaignId: id,
         ...readString5(item, "campaignKey") !== void 0 ? { campaignKey: readString5(item, "campaignKey") } : {},
         ...readString5(item, "actionType") !== void 0 ? { actionType: readString5(item, "actionType") } : {},
         ...readString5(item, "claimStatus") !== void 0 ? { claimStatus: readString5(item, "claimStatus") } : {},
-        ...benefitAmount(item) !== void 0 ? { amount: benefitAmount(item) } : {}
+        ...benefitAmount(item) !== void 0 ? { amount: benefitAmount(item) } : {},
+        ...unavailableReason !== void 0 ? { unavailableReason } : {}
       });
     }
   }
@@ -61947,13 +62282,26 @@ function claimableCampaigns(parsed) {
     (c) => c.actionType === "CLAIM_BENEFIT" && c.claimStatus === "CLAIMABLE"
   );
 }
+var QODER_CAMPAIGN_FAILURE_CN = {
+  REDEMPTION_CODE_OUT_OF_STOCK: "\u4ECA\u65E5\u540D\u989D\u5DF2\u53D1\u5B8C\uFF08\u6BCF\u65E5 10:00 \u5237\u65B0\uFF0C\u6B21\u65E5\u518D\u6765\uFF09",
+  ACHIEVEMENT_NOT_COMPLETED: "\u9700\u5148\u5B8C\u6210\u65B0\u4EBA\u4EFB\u52A1\uFF08\u6210\u5C31\u672A\u5B8C\u6210\uFF09",
+  CAMPAIGN_NOT_ACTIVE: "\u6D3B\u52A8\u5DF2\u7ED3\u675F/\u672A\u5F00\u59CB",
+  RISK_BLOCKED: "\u98CE\u63A7\u62E6\u622A\uFF08\u5F53\u524D\u8BBE\u5907/\u8D26\u53F7\u4E0D\u53EF\u9886\u53D6\uFF09",
+  RISK_DEPENDENCY_UNAVAILABLE: "\u98CE\u63A7\u670D\u52A1\u4E0D\u53EF\u7528\uFF0C\u7A0D\u540E\u91CD\u8BD5",
+  SAME_PERSON_ALREADY_CLAIMED: "\u540C\u4EBA/\u540C\u8BBE\u5907\u672C\u8F6E\u5DF2\u9886\u53D6\uFF08\u670D\u52A1\u7AEF\u6309\u8BBE\u5907\u53BB\u91CD\uFF09"
+};
 function parseClaimResult(body) {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return {};
   const root = body;
+  const failureCode = readString5(root, "failureCode") ?? readString5(root, "errorCode");
+  const message2 = readString5(root, "message") ?? readString5(root, "errorMessage");
   return {
     ...readString5(root, "status") !== void 0 ? { status: readString5(root, "status") } : {},
     ...typeof root.replayed === "boolean" ? { replayed: root.replayed } : {},
-    ...benefitAmount(root) !== void 0 ? { amount: benefitAmount(root) } : {}
+    ...benefitAmount(root) !== void 0 ? { amount: benefitAmount(root) } : {},
+    ...failureCode !== void 0 ? { failureCode } : {},
+    ...typeof root.success === "boolean" ? { success: root.success } : {},
+    ...message2 !== void 0 ? { message: message2 } : {}
   };
 }
 async function claimQoderCampaign(credential, product, campaignId, fetcher = fetch) {
@@ -61976,14 +62324,46 @@ async function claimQoderCampaign(credential, product, campaignId, fetcher = fet
   } catch {
     return { kind: "failed", code: response.status, message: describeNonJson(response.status, text) };
   }
-  if (!response.ok) {
-    return { kind: "failed", code: response.status, message: describeNonJson(response.status, text) };
-  }
   const result = parseClaimResult(body);
-  if (result.replayed === true) {
+  const upperFailure = result.failureCode?.toUpperCase();
+  const upperStatus = result.status?.toUpperCase();
+  if (!response.ok) {
+    const codeKey = upperFailure ?? upperStatus;
+    if (codeKey === "ALREADY_CLAIMED" || codeKey === "REPLAYED") {
+      return { kind: "already-claimed", message: "\u4ECA\u5929\u5DF2\u9886\u53D6" };
+    }
+    if (codeKey === "SAME_PERSON_ALREADY_CLAIMED") {
+      return { kind: "inactive", message: QODER_CAMPAIGN_FAILURE_CN.SAME_PERSON_ALREADY_CLAIMED };
+    }
+    if (codeKey !== void 0 && QODER_CAMPAIGN_FAILURE_CN[codeKey] !== void 0) {
+      return { kind: "failed", code: response.status, message: QODER_CAMPAIGN_FAILURE_CN[codeKey] };
+    }
+    if (response.status === 401 || response.status === 403) {
+      return { kind: "failed", code: response.status, message: describeNonJson(response.status, text) };
+    }
+    return { kind: "failed", code: response.status, message: result.message ?? describeNonJson(response.status, text) };
+  }
+  if (result.replayed === true || upperFailure === "ALREADY_CLAIMED" || upperFailure === "REPLAYED") {
     return { kind: "already-claimed", message: "\u4ECA\u5929\u5DF2\u9886\u53D6" };
   }
-  if (result.status !== void 0 && result.status !== "CLAIMED") {
+  if (upperFailure === "SAME_PERSON_ALREADY_CLAIMED") {
+    return { kind: "inactive", message: QODER_CAMPAIGN_FAILURE_CN.SAME_PERSON_ALREADY_CLAIMED };
+  }
+  if (upperFailure !== void 0) {
+    return {
+      kind: "failed",
+      code: -1,
+      message: QODER_CAMPAIGN_FAILURE_CN[upperFailure] ?? `\u9886\u53D6\u672A\u6210\u529F\uFF08${upperFailure}\uFF09`
+    };
+  }
+  if (result.success === false) {
+    return {
+      kind: "failed",
+      code: -1,
+      message: result.message ?? `\u9886\u53D6\u672A\u6210\u529F${result.status ? `\uFF08status=${result.status}\uFF09` : ""}`
+    };
+  }
+  if (upperStatus !== void 0 && upperStatus !== "CLAIMED" && upperStatus !== "GRANTED" && upperStatus !== "SUCCESS") {
     return { kind: "failed", code: -1, message: `\u9886\u53D6\u672A\u6210\u529F\uFF08status=${result.status}\uFF09` };
   }
   return { kind: "claimed", credit: result.amount ?? 0, streakDays: 0, isStreakDay: false };
@@ -62009,6 +62389,15 @@ async function claimQoderDailyCheckin(credential, product, fetcher = fetch, nowM
       if (!refreshed) return { kind: "inactive", message: NOT_REFRESHED_YET_HINT };
       return { kind: "already-claimed", message: "\u4ECA\u5929\u5DF2\u9886\u53D6" };
     }
+    const benefitReasons = parsed.campaigns.filter((c) => c.actionType === "CLAIM_BENEFIT" && c.unavailableReason !== void 0).map((c) => c.unavailableReason.toUpperCase());
+    for (const reason of benefitReasons) {
+      if (reason === "RISK_BLOCKED" || reason === "RISK_DEPENDENCY_UNAVAILABLE") {
+        return { kind: "failed", code: -1, message: QODER_CAMPAIGN_FAILURE_CN[reason] };
+      }
+      if (reason === "SAME_PERSON_ALREADY_CLAIMED" || reason === "REDEMPTION_CODE_OUT_OF_STOCK" || reason === "ACHIEVEMENT_NOT_COMPLETED" || reason === "CAMPAIGN_NOT_ACTIVE") {
+        return { kind: "inactive", message: QODER_CAMPAIGN_FAILURE_CN[reason] };
+      }
+    }
     const usage = await fetchQoderUsageRaw(credential, product, fetcher);
     if (isQoderNotActivated(parsed, usage)) {
       return { kind: "inactive", message: NOT_ACTIVATED_HINT, actionRequired: true };
@@ -62017,13 +62406,19 @@ async function claimQoderDailyCheckin(credential, product, fetcher = fetch, nowM
   }
   let total = 0;
   let firstError;
+  let anyAlreadyClaimed = false;
+  let anyInactiveMsg;
   for (const target of targets) {
     const outcome = await claimQoderCampaign(credential, product, target.campaignId, fetcher);
     if (outcome.kind === "claimed") total += outcome.credit;
     else if (outcome.kind === "failed" && firstError === void 0) firstError = outcome.message;
+    else if (outcome.kind === "already-claimed") anyAlreadyClaimed = true;
+    else if (outcome.kind === "inactive" && anyInactiveMsg === void 0) anyInactiveMsg = outcome.message;
   }
   if (total > 0) return { kind: "claimed", credit: total, streakDays: 0, isStreakDay: false, ...stale };
   if (firstError !== void 0) return { kind: "failed", code: -1, message: firstError };
+  if (anyAlreadyClaimed) return { kind: "already-claimed", message: "\u4ECA\u5929\u5DF2\u9886\u53D6", ...stale };
+  if (anyInactiveMsg !== void 0) return { kind: "inactive", message: anyInactiveMsg };
   return { kind: "already-claimed", message: "\u4ECA\u5929\u5DF2\u9886\u53D6", ...stale };
 }
 
@@ -62827,11 +63222,11 @@ function readGeminiUsage(raw) {
   if (raw === void 0 || raw === null) return {};
   const out = {};
   const prompt = nonNegativeInt(raw.promptTokenCount);
-  const cached2 = nonNegativeInt(raw.cachedContentTokenCount) ?? 0;
-  if (prompt !== void 0) out.inputTokens = Math.max(0, prompt - cached2);
+  const cached = nonNegativeInt(raw.cachedContentTokenCount) ?? 0;
+  if (prompt !== void 0) out.inputTokens = Math.max(0, prompt - cached);
   const candidates = nonNegativeInt(raw.candidatesTokenCount);
   if (candidates !== void 0) out.outputTokens = candidates;
-  if (cached2 > 0) out.cacheReadTokens = cached2;
+  if (cached > 0) out.cacheReadTokens = cached;
   const total = nonNegativeInt(raw.totalTokenCount);
   if (total !== void 0) out.totalTokens = total;
   const thoughts = nonNegativeInt(raw.thoughtsTokenCount);
@@ -63026,8 +63421,8 @@ function parseGeminiProject(payload) {
 async function resolveGeminiProject(options) {
   const cache5 = options.cache;
   const identity = geminiCredentialIdentity(options.credential);
-  const cached2 = cache5?.get(identity);
-  if (cached2 !== void 0 && cached2 !== "") return { project: cached2 };
+  const cached = cache5?.get(identity);
+  if (cached !== void 0 && cached !== "") return { project: cached };
   const fromCredential = options.credential.cloudaicompanionProject;
   if (fromCredential !== void 0 && fromCredential !== "") {
     cache5?.set(identity, fromCredential);
@@ -63981,8 +64376,8 @@ async function handleOpencodeRpc(ctx, pool, method, payload) {
 }
 
 // vendor/channel-pack/src/badge-preferences.ts
-import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync7, renameSync as renameSync5, writeFileSync as writeFileSync6 } from "node:fs";
-import { join as join6 } from "node:path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync8, renameSync as renameSync6, writeFileSync as writeFileSync7 } from "node:fs";
+import { join as join7 } from "node:path";
 var BADGE_PREFERENCES_FILE = "ui-preferences.json";
 var BADGE_PREFERENCES = ["auto", "subscription", "credits"];
 var DEFAULT_BADGE_PREFERENCE = "auto";
@@ -64007,8 +64402,8 @@ var FilePreferenceStore = class {
   kind = "file";
   load() {
     try {
-      if (!existsSync7(this.path)) return DEFAULT_BADGE_PREFERENCE;
-      const parsed = JSON.parse(readFileSync7(this.path, "utf-8"));
+      if (!existsSync8(this.path)) return DEFAULT_BADGE_PREFERENCE;
+      const parsed = JSON.parse(readFileSync8(this.path, "utf-8"));
       return sanitizeBadgePreference(preferenceFieldOf(parsed));
     } catch (error) {
       this.logger?.warn(`[channel-pack] \u8BFB\u53D6 ${this.path} \u5931\u8D25\uFF0C\u7528\u91CF\u5FBD\u6807\u504F\u597D\u6309\u9ED8\u8BA4\u503C\u5904\u7406: ${String(error)}`);
@@ -64016,10 +64411,10 @@ var FilePreferenceStore = class {
     }
   }
   async save(preference) {
-    mkdirSync5(join6(this.path, ".."), { recursive: true });
+    mkdirSync6(join7(this.path, ".."), { recursive: true });
     const tmp = `${this.path}.tmp`;
-    writeFileSync6(tmp, JSON.stringify({ schema: SCHEMA3, badgePreference: preference }, null, 2), "utf-8");
-    renameSync5(tmp, this.path);
+    writeFileSync7(tmp, JSON.stringify({ schema: SCHEMA3, badgePreference: preference }, null, 2), "utf-8");
+    renameSync6(tmp, this.path);
   }
 };
 var SCHEMA3 = "channel-pack/ui-preferences/v1";
@@ -64034,7 +64429,7 @@ function createBadgePreferenceStore(ctx) {
     ctx.logger?.warn?.("[channel-pack] \u65E0\u6CD5\u5B9A\u4F4D DSH home\uFF0C\u7528\u91CF\u5FBD\u6807\u504F\u597D\u4EC5\u5B58\u5728\u4E8E\u5185\u5B58\u4E2D");
     return new MemoryPreferenceStore();
   }
-  return new FilePreferenceStore(join6(home, "channel-pack", BADGE_PREFERENCES_FILE), ctx.logger);
+  return new FilePreferenceStore(join7(home, "channel-pack", BADGE_PREFERENCES_FILE), ctx.logger);
 }
 
 // vendor/channel-pack/src/badge-subscription.ts
@@ -64208,8 +64603,8 @@ function isAllFailed(snapshot) {
 }
 
 // vendor/channel-pack/src/auto-checkin.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync8, renameSync as renameSync6, writeFileSync as writeFileSync7 } from "node:fs";
-import { join as join7 } from "node:path";
+import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync9, renameSync as renameSync7, writeFileSync as writeFileSync8 } from "node:fs";
+import { join as join8 } from "node:path";
 var AUTO_CHECKIN_FILE = "auto-checkin.json";
 var SCHEMA4 = "channel-pack/auto-checkin/v1";
 var DEFAULT_AUTO_CHECKIN = {
@@ -64283,17 +64678,17 @@ var FileAutoCheckinStore = class {
   kind = "file";
   load() {
     try {
-      if (!existsSync8(this.path)) return { ...DEFAULT_AUTO_CHECKIN };
-      return sanitizeAutoCheckin(JSON.parse(readFileSync8(this.path, "utf-8")));
+      if (!existsSync9(this.path)) return { ...DEFAULT_AUTO_CHECKIN };
+      return sanitizeAutoCheckin(JSON.parse(readFileSync9(this.path, "utf-8")));
     } catch (error) {
       this.logger?.warn(`[channel-pack] \u8BFB\u53D6 ${this.path} \u5931\u8D25\uFF0C\u81EA\u52A8\u7B7E\u5230\u6309\u9ED8\u8BA4\u8BBE\u7F6E\uFF08\u5F00\u542F\uFF09\u5904\u7406: ${String(error)}`);
       return { ...DEFAULT_AUTO_CHECKIN };
     }
   }
   async save(doc) {
-    mkdirSync6(join7(this.path, ".."), { recursive: true });
+    mkdirSync7(join8(this.path, ".."), { recursive: true });
     const tmp = `${this.path}.tmp`;
-    writeFileSync7(tmp, JSON.stringify({
+    writeFileSync8(tmp, JSON.stringify({
       schema: SCHEMA4,
       enabled: doc.enabled,
       lastDate: doc.lastDate,
@@ -64302,7 +64697,7 @@ var FileAutoCheckinStore = class {
       channels: doc.channels,
       dismissedRunAt: doc.dismissedRunAt
     }, null, 2), "utf-8");
-    renameSync6(tmp, this.path);
+    renameSync7(tmp, this.path);
   }
 };
 function createAutoCheckinStore(ctx) {
@@ -64311,7 +64706,7 @@ function createAutoCheckinStore(ctx) {
     ctx.logger?.warn?.("[channel-pack] \u65E0\u6CD5\u5B9A\u4F4D DSH home\uFF0C\u81EA\u52A8\u7B7E\u5230\u5F00\u5173\u4EC5\u5B58\u5728\u4E8E\u5185\u5B58\u4E2D");
     return new MemoryAutoCheckinStore();
   }
-  return new FileAutoCheckinStore(join7(home, "channel-pack", AUTO_CHECKIN_FILE), ctx.logger);
+  return new FileAutoCheckinStore(join8(home, "channel-pack", AUTO_CHECKIN_FILE), ctx.logger);
 }
 function emptyTotals2() {
   return { providers: 0, claimed: 0, totalCredit: 0, totalByUnit: { token: 0, credit: 0 }, alreadyClaimed: 0, inactive: 0, failed: 0, coversToday: 0, skipped: 0, errors: 0 };
@@ -64359,7 +64754,7 @@ function createAutoCheckin(deps) {
   let doc = deps.store.load();
   let running2 = false;
   let stopped = false;
-  let inflight = null;
+  let inflight2 = null;
   let pending = null;
   let tick = null;
   let lastAttemptAt = doc.lastAt;
@@ -64474,7 +64869,7 @@ function createAutoCheckin(deps) {
   }
   function runIfDue() {
     if (stopped) return Promise.resolve();
-    if (inflight !== null) return inflight;
+    if (inflight2 !== null) return inflight2;
     if (!doc.enabled) return Promise.resolve();
     if (doc.lastDate !== "" && doc.lastDate === today()) return Promise.resolve();
     running2 = true;
@@ -64482,9 +64877,9 @@ function createAutoCheckin(deps) {
       deps.warn?.(`[channel-pack] \u81EA\u52A8\u7B7E\u5230\u5F02\u5E38: ${String(error)}`);
     }).finally(() => {
       running2 = false;
-      inflight = null;
+      inflight2 = null;
     });
-    inflight = task;
+    inflight2 = task;
     return task;
   }
   return {
@@ -67297,23 +67692,23 @@ function reply(rpcId, result) {
 // vendor/channel-pack/src/openai-gateway/server.ts
 import { createServer as createServer7 } from "node:http";
 import { randomUUID as randomUUID12 } from "node:crypto";
-import { homedir as homedir4 } from "node:os";
-import { join as join9 } from "node:path";
+import { homedir as homedir5 } from "node:os";
+import { join as join10 } from "node:path";
 
 // vendor/channel-pack/src/openai-gateway/auth.ts
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync9, renameSync as renameSync7, writeFileSync as writeFileSync8, existsSync as existsSync9 } from "node:fs";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync10, renameSync as renameSync8, writeFileSync as writeFileSync9, existsSync as existsSync10 } from "node:fs";
 import { randomBytes as randomBytes11 } from "node:crypto";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 var KEY_FILE = "api-key";
 var KEY_PATTERN2 = /^[A-Za-z0-9_-]{43}$/;
 function loadOrCreateApiKey(home, env = process.env) {
   const configured = env.DSH_OPENAI_GATEWAY_API_KEY?.trim();
   if (configured) return { value: configured, fromEnv: true, path: null };
-  const directory = join8(home, "openai-gateway");
-  const path2 = join8(directory, KEY_FILE);
+  const directory = join9(home, "openai-gateway");
+  const path2 = join9(directory, KEY_FILE);
   let stored;
   try {
-    stored = readFileSync9(path2, "utf8").trim();
+    stored = readFileSync10(path2, "utf8").trim();
   } catch {
   }
   if (stored) {
@@ -67323,14 +67718,14 @@ function loadOrCreateApiKey(home, env = process.env) {
     );
   }
   const key = randomBytes11(32).toString("base64url");
-  mkdirSync7(directory, { recursive: true });
+  mkdirSync8(directory, { recursive: true });
   const temporary = `${path2}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync8(temporary, key, { encoding: "utf8", mode: 384 });
+  writeFileSync9(temporary, key, { encoding: "utf8", mode: 384 });
   try {
-    renameSync7(temporary, path2);
+    renameSync8(temporary, path2);
   } catch (error) {
-    if (existsSync9(path2)) {
-      const existing = readFileSync9(path2, "utf8").trim();
+    if (existsSync10(path2)) {
+      const existing = readFileSync10(path2, "utf8").trim();
       if (KEY_PATTERN2.test(existing)) return { value: existing, fromEnv: false, path: path2 };
     }
     throw error;
@@ -67702,7 +68097,7 @@ function findCaseInsensitiveSuggestion(requested, catalog) {
 }
 
 // vendor/channel-pack/src/openai-gateway/responses.ts
-import { createHash as createHash7, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash8, randomUUID as randomUUID11 } from "node:crypto";
 import { ReasoningEffortId as ReasoningEffortId13 } from "@deepseek-ai/dsh-llm";
 
 // vendor/channel-pack/src/openai-gateway/stream.ts
@@ -67713,9 +68108,9 @@ function count(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
 }
 function toOpenAiUsage(usage) {
-  const cached2 = count(usage.cacheReadTokens);
+  const cached = count(usage.cacheReadTokens);
   const written = count(usage.cacheWriteTokens);
-  const inputTokens = count(usage.inputTokens) + cached2 + written;
+  const inputTokens = count(usage.inputTokens) + cached + written;
   const outputTokens = count(usage.outputTokens);
   const reported = typeof usage.totalTokens === "number" && Number.isFinite(usage.totalTokens) && usage.totalTokens > 0 ? Math.trunc(usage.totalTokens) : void 0;
   return {
@@ -67727,7 +68122,7 @@ function toOpenAiUsage(usage) {
     // （本仓库无法穷举验证 14 个 provider），直接采信就会原样重现本缺陷。
     // 取较大者保证「只会多算、绝不漏算」—— 漏算的代价是自动压缩永不触发。
     totalTokens: Math.max(reported ?? 0, inputTokens + outputTokens),
-    cachedTokens: cached2,
+    cachedTokens: cached,
     ...count(usage.reasoningTokens) > 0 ? { reasoningTokens: count(usage.reasoningTokens) } : {}
   };
 }
@@ -68029,7 +68424,7 @@ function chatPartsFromResponses(content) {
 function flatNamespaceToolName(namespace, name2) {
   const flat = `${namespace}__${name2}`;
   if (flat.length <= 64) return flat;
-  const digest = createHash7("sha256").update(flat).digest("hex").slice(0, 8);
+  const digest = createHash8("sha256").update(flat).digest("hex").slice(0, 8);
   return `${flat.slice(0, 55)}_${digest}`;
 }
 function responsesNamespaceToolMap(body) {
@@ -68738,7 +69133,7 @@ function authorized(request2, key) {
   return typeof value === "string" && value === `Bearer ${key}`;
 }
 function getHome(options) {
-  return options.home ?? options.env?.DSH_HOME ?? process.env.DSH_HOME ?? join9(homedir4(), ".dsh");
+  return options.home ?? options.env?.DSH_HOME ?? process.env.DSH_HOME ?? join10(homedir5(), ".dsh");
 }
 function createOpenAiGateway(options) {
   const env = options.env ?? process.env;
@@ -69244,8 +69639,8 @@ function installLoopResume(ctx) {
 }
 
 // vendor/channel-pack/src/token-ledger-store.ts
-import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync10, renameSync as renameSync8, writeFileSync as writeFileSync9 } from "node:fs";
-import { join as join10 } from "node:path";
+import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync11, renameSync as renameSync9, writeFileSync as writeFileSync10 } from "node:fs";
+import { join as join11 } from "node:path";
 var TOKEN_LEDGER_FILE = "token-ledger.json";
 var TOKEN_LEDGER_DAYS = 90;
 var TOKEN_LEDGER_FLUSH_MS = 2e3;
@@ -69294,8 +69689,8 @@ var FileLedgerStore = class {
   readFile() {
     const out = /* @__PURE__ */ new Map();
     try {
-      if (!existsSync10(this.path)) return out;
-      const parsed = JSON.parse(readFileSync10(this.path, "utf-8"));
+      if (!existsSync11(this.path)) return out;
+      const parsed = JSON.parse(readFileSync11(this.path, "utf-8"));
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return out;
       const record = parsed;
       if (typeof record.days !== "object" || record.days === null || Array.isArray(record.days)) return out;
@@ -69386,7 +69781,7 @@ var FileLedgerStore = class {
    */
   flush() {
     try {
-      mkdirSync8(join10(this.path, ".."), { recursive: true });
+      mkdirSync9(join11(this.path, ".."), { recursive: true });
       const merged = this.readFile();
       let hasDelta = false;
       for (const [day, buckets] of this.days) {
@@ -69414,8 +69809,8 @@ var FileLedgerStore = class {
         days[day] = Object.fromEntries(buckets);
       }
       const tmp = `${this.path}.tmp`;
-      writeFileSync9(tmp, JSON.stringify({ schema: SCHEMA5, days }, null, 2), "utf-8");
-      renameSync8(tmp, this.path);
+      writeFileSync10(tmp, JSON.stringify({ schema: SCHEMA5, days }, null, 2), "utf-8");
+      renameSync9(tmp, this.path);
       this.written = cloneDays(this.days);
     } catch (error) {
       this.logger?.warn(`[channel-pack] \u5199\u5165 ${this.path} \u5931\u8D25\uFF08\u672C\u6B21\u7EDF\u8BA1\u4E0D\u5165\u76D8\uFF09: ${String(error)}`);
@@ -69475,7 +69870,7 @@ function createTokenLedgerStore(ctx) {
     ctx.logger?.warn?.("[channel-pack] \u65E0\u6CD5\u5B9A\u4F4D DSH home\uFF0CToken \u7528\u91CF\u5386\u53F2\u4EC5\u5B58\u5728\u4E8E\u5185\u5B58\u4E2D");
     return new MemoryLedgerStore();
   }
-  return new FileLedgerStore(join10(home, "channel-pack", TOKEN_LEDGER_FILE), ctx.logger);
+  return new FileLedgerStore(join11(home, "channel-pack", TOKEN_LEDGER_FILE), ctx.logger);
 }
 
 // vendor/channel-pack/src/buddy-balance-rank.ts
@@ -69570,11 +69965,11 @@ var BuddyBalanceSelector = class {
    */
   async balanceOf(account) {
     const now = this.deps.now?.() ?? Date.now();
-    const cached2 = this.cache.get(account.id);
-    if (cached2 !== void 0) {
-      const ttl = cached2.source.ok ? this.deps.ttlMs ?? BUDDY_BALANCE_CACHE_TTL_MS : this.deps.errorTtlMs ?? BUDDY_BALANCE_ERROR_CACHE_TTL_MS;
-      if (now - cached2.at < ttl) {
-        return this.classify(account.id, cached2.source, now);
+    const cached = this.cache.get(account.id);
+    if (cached !== void 0) {
+      const ttl = cached.source.ok ? this.deps.ttlMs ?? BUDDY_BALANCE_CACHE_TTL_MS : this.deps.errorTtlMs ?? BUDDY_BALANCE_ERROR_CACHE_TTL_MS;
+      if (now - cached.at < ttl) {
+        return this.classify(account.id, cached.source, now);
       }
     }
     const source = await this.fetchSource(account);
@@ -69696,7 +70091,7 @@ import { Service as Service10 } from "@deepseek-ai/cordis";
 import { credentialRef as credentialRef14 } from "@deepseek-ai/dsh-credentials";
 
 // vendor/channel-pack/src/minimax-oauth.ts
-import { createHash as createHash8, randomBytes as randomBytes12 } from "node:crypto";
+import { createHash as createHash9, randomBytes as randomBytes12 } from "node:crypto";
 var MinimaxLoginCancelledError = class extends Error {
   constructor(message2 = "\u7528\u6237\u53D6\u6D88\u4E86 MiniMax \u6388\u6743") {
     super(message2);
@@ -69796,7 +70191,7 @@ function parseMinimaxTokenGrant(payload, previousRefreshToken, product = MINIMAX
 }
 function createMinimaxPkce() {
   const codeVerifier = randomBytes12(32).toString("base64url");
-  const codeChallenge = createHash8("sha256").update(codeVerifier, "ascii").digest("base64url");
+  const codeChallenge = createHash9("sha256").update(codeVerifier, "ascii").digest("base64url");
   return { codeVerifier, codeChallenge };
 }
 async function startMinimaxDeviceAuthorization(fetcher = fetch, product = MINIMAX) {
@@ -71420,15 +71815,15 @@ var GeminiAuth = class extends Service11 {
 };
 
 // vendor/channel-pack/src/gemini-sigstore.ts
-import { createHash as createHash9 } from "node:crypto";
-import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync11, renameSync as renameSync9, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname2, join as join11 } from "node:path";
+import { createHash as createHash10 } from "node:crypto";
+import { existsSync as existsSync12, mkdirSync as mkdirSync10, readFileSync as readFileSync12, renameSync as renameSync10, writeFileSync as writeFileSync11 } from "node:fs";
+import { dirname as dirname2, join as join12 } from "node:path";
 var GEMINI_SIG_FILE = "gemini-sigs.json";
 var GEMINI_SIG_MAX_ENTRIES = 2e3;
 var SIG_KEY_BODY_LIMIT = 512;
 function geminiSigKey(role, text) {
   const body = text.length > SIG_KEY_BODY_LIMIT ? text.slice(0, SIG_KEY_BODY_LIMIT) : text;
-  return createHash9("sha256").update(`${role}\0${body}`, "utf8").digest("hex").slice(0, 16);
+  return createHash10("sha256").update(`${role}\0${body}`, "utf8").digest("hex").slice(0, 16);
 }
 function geminiToolSigKey(name2, argsJson) {
   return geminiSigKey(`tool:${name2}`, argsJson);
@@ -71531,10 +71926,10 @@ var GeminiSigStore = class {
       2
     );
     try {
-      mkdirSync9(dirname2(this.path), { recursive: true });
+      mkdirSync10(dirname2(this.path), { recursive: true });
       const tmp = `${this.path}.tmp`;
-      writeFileSync10(tmp, payload, "utf-8");
-      renameSync9(tmp, this.path);
+      writeFileSync11(tmp, payload, "utf-8");
+      renameSync10(tmp, this.path);
     } catch (error) {
       this.logger?.warn(`[gemini] \u7B7E\u540D\u7F13\u5B58\u5199\u5165\u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u63A8\u7406\uFF09: ${String(error)}`);
     }
@@ -71544,8 +71939,8 @@ var GeminiSigStore = class {
     const out = /* @__PURE__ */ new Map();
     if (this.path === void 0) return out;
     try {
-      if (!existsSync11(this.path)) return out;
-      const parsed = JSON.parse(readFileSync11(this.path, "utf-8"));
+      if (!existsSync12(this.path)) return out;
+      const parsed = JSON.parse(readFileSync12(this.path, "utf-8"));
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return out;
       for (const [key, value] of Object.entries(parsed)) {
         if (typeof value !== "object" || value === null) continue;
@@ -71569,7 +71964,7 @@ function createGeminiSigStore(ctx) {
     ctx.logger?.warn?.("[gemini] \u65E0\u6CD5\u5B9A\u4F4D DSH home\uFF0C\u7B7E\u540D\u7F13\u5B58\u4EC5\u5B58\u5728\u4E8E\u5185\u5B58\u4E2D\uFF08\u547D\u4E2D\u7387\u4F1A\u5728\u91CD\u542F\u540E\u5F52\u96F6\uFF09");
     return new GeminiSigStore(void 0, ctx.logger);
   }
-  return new GeminiSigStore(join11(home, "channel-pack", GEMINI_SIG_FILE), ctx.logger);
+  return new GeminiSigStore(join12(home, "channel-pack", GEMINI_SIG_FILE), ctx.logger);
 }
 
 // vendor/channel-pack/src/opencode-adapter.ts
@@ -71797,9 +72192,9 @@ function buildOpencodePayloadWithToolMap(input) {
 
 // vendor/channel-pack/src/opencode-capability.ts
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { readFileSync as readFileSync12 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { join as join12 } from "node:path";
+import { readFileSync as readFileSync13 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { join as join13 } from "node:path";
 var MEASURED_IMAGE_OVERRIDES = {
   // 实测 2026-10-02：models.dev 标 `modalities.input: ["text"]`，
   // 但 1×1 PNG 的多模态请求真实返回 200（big-pickle 是最常用的免费模型）。
@@ -71859,8 +72254,8 @@ function normalizeEntry(id, raw) {
   };
 }
 function cacheFilePath() {
-  const home = process.env.DSH_HOME?.trim() || join12(homedir5(), ".dsh");
-  return join12(home, "cache", "opencode-capabilities.json");
+  const home = process.env.DSH_HOME?.trim() || join13(homedir6(), ".dsh");
+  return join13(home, "cache", "opencode-capabilities.json");
 }
 var memory = [];
 var cacheFileAt = 0;
@@ -71883,7 +72278,7 @@ function loadDiskCacheSync() {
   if (diskLoaded) return;
   diskLoaded = true;
   try {
-    const raw = readFileSync12(cacheFilePath(), "utf8");
+    const raw = readFileSync13(cacheFilePath(), "utf8");
     const parsed = JSON.parse(raw);
     if (parsed?.version === 3 && Array.isArray(parsed.entries) && parsed.entries.length > 0) {
       memory = parsed.entries;
@@ -71895,7 +72290,7 @@ function loadDiskCacheSync() {
 async function writeDiskCache(entries) {
   try {
     const path2 = cacheFilePath();
-    await mkdir(join12(path2, ".."), { recursive: true });
+    await mkdir(join13(path2, ".."), { recursive: true });
     const payload = { version: 3, at: Date.now(), entries };
     await writeFile(path2, JSON.stringify(payload), "utf8");
   } catch {
@@ -71959,8 +72354,8 @@ function inputModalitiesOf(capabilities, modelId) {
 var DEFAULT_CATALOG_TTL_MS = 3e5;
 var catalogCache = /* @__PURE__ */ new Map();
 async function loadOpencodeCatalog(fetchCatalog, slot2, ttlMs2 = DEFAULT_CATALOG_TTL_MS) {
-  const cached2 = catalogCache.get(slot2.id);
-  if (cached2 !== void 0 && ttlMs2 > 0 && Date.now() - cached2.at < ttlMs2) return cached2.entries;
+  const cached = catalogCache.get(slot2.id);
+  if (cached !== void 0 && ttlMs2 > 0 && Date.now() - cached.at < ttlMs2) return cached.entries;
   let entries;
   try {
     const response = await fetchCatalog(slot2);
@@ -72305,11 +72700,11 @@ function lazyOpencodeUserAgent() {
       const version = out.match(/(\d+\.\d+\.\d+)/)?.[1];
       return opencodeUserAgentForVersion(version) ?? OPENCODE.defaultUserAgent;
     }).catch(() => OPENCODE.defaultUserAgent);
-    let cached2 = OPENCODE.defaultUserAgent;
+    let cached = OPENCODE.defaultUserAgent;
     void pending.then((ua) => {
-      cached2 = ua;
+      cached = ua;
     });
-    return cached2;
+    return cached;
   };
 }
 var OPENCODE_CATALOG_TIMEOUT_MS = 8e3;

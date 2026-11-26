@@ -230,13 +230,17 @@ async function creditsHeaders(
   credential: QoderCredential,
   product: QoderProduct,
 ): Promise<Record<string, string>> {
-  return await withQoderMachineHeadersAsync({
-    Accept: 'application/json',
-    Authorization: `Bearer ${qoderBearerToken(credential)}`,
-    // 桌面 app 身份（`'10'`）；服务端据此进入活动下发分支。
-    'Cosy-ClientType': product.sashClientType,
-    'User-Agent': 'Qoder',
-  })
+  return await withQoderMachineHeadersAsync(
+    {
+      Accept: 'application/json',
+      Authorization: `Bearer ${qoderBearerToken(credential)}`,
+      // 桌面 app 身份（`'10'`）；服务端据此进入活动下发分支。
+      'Cosy-ClientType': product.sashClientType,
+      'User-Agent': 'Qoder',
+    },
+    undefined,
+    product.id,
+  )
 }
 
 /** 安全读数字字段（容忍字符串与缺失）；无法解析时返回 undefined。 */
@@ -405,6 +409,8 @@ export interface QoderCampaign {
   claimStatus?: string
   /** 可领积分（`benefit.amount`）。 */
   amount?: number
+  /** 不可领原因码（如 `ACHIEVEMENT_NOT_COMPLETED` / `RISK_BLOCKED`）。 */
+  unavailableReason?: string
 }
 
 /**
@@ -430,12 +436,14 @@ export function parseQoderCampaigns(body: unknown): QoderCampaigns | undefined {
     for (const item of raw) {
       const id = readString(item, 'campaignId')
       if (id === undefined) continue
+      const unavailableReason = readString(item, 'unavailableReason') ?? readString(item, 'unavailable_reason')
       campaigns.push({
         campaignId: id,
         ...readString(item, 'campaignKey') !== undefined ? { campaignKey: readString(item, 'campaignKey')! } : {},
         ...readString(item, 'actionType') !== undefined ? { actionType: readString(item, 'actionType')! } : {},
         ...readString(item, 'claimStatus') !== undefined ? { claimStatus: readString(item, 'claimStatus')! } : {},
         ...benefitAmount(item) !== undefined ? { amount: benefitAmount(item)! } : {},
+        ...unavailableReason !== undefined ? { unavailableReason } : {},
       })
     }
   }
@@ -574,21 +582,39 @@ function claimableCampaigns(parsed: QoderCampaigns): QoderCampaign[] {
   )
 }
 
+/** 活动拒绝/不可领状态码对应的可读中文说明。 */
+export const QODER_CAMPAIGN_FAILURE_CN: Readonly<Record<string, string>> = {
+  REDEMPTION_CODE_OUT_OF_STOCK: '今日名额已发完（每日 10:00 刷新，次日再来）',
+  ACHIEVEMENT_NOT_COMPLETED: '需先完成新人任务（成就未完成）',
+  CAMPAIGN_NOT_ACTIVE: '活动已结束/未开始',
+  RISK_BLOCKED: '风控拦截（当前设备/账号不可领取）',
+  RISK_DEPENDENCY_UNAVAILABLE: '风控服务不可用，稍后重试',
+  SAME_PERSON_ALREADY_CLAIMED: '同人/同设备本轮已领取（服务端按设备去重）',
+}
+
 /** 领取响应里我们需要的字段。 */
 interface QoderClaimResult {
   status?: string
   replayed?: boolean
   amount?: number
+  failureCode?: string
+  success?: boolean
+  message?: string
 }
 
 /** 解析 claim 响应。 */
 function parseClaimResult(body: unknown): QoderClaimResult {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return {}
   const root = body as Record<string, unknown>
+  const failureCode = readString(root, 'failureCode') ?? readString(root, 'errorCode')
+  const message = readString(root, 'message') ?? readString(root, 'errorMessage')
   return {
     ...readString(root, 'status') !== undefined ? { status: readString(root, 'status')! } : {},
     ...typeof root.replayed === 'boolean' ? { replayed: root.replayed } : {},
     ...benefitAmount(root) !== undefined ? { amount: benefitAmount(root)! } : {},
+    ...failureCode !== undefined ? { failureCode } : {},
+    ...typeof root.success === 'boolean' ? { success: root.success } : {},
+    ...message !== undefined ? { message } : {},
   }
 }
 
@@ -625,16 +651,49 @@ export async function claimQoderCampaign(
   try { body = text.length > 0 ? JSON.parse(text) : {} } catch {
     return { kind: 'failed', code: response.status, message: describeNonJson(response.status, text) }
   }
+  const result = parseClaimResult(body)
+  const upperFailure = result.failureCode?.toUpperCase()
+  const upperStatus = result.status?.toUpperCase()
+
   if (!response.ok) {
-    return { kind: 'failed', code: response.status, message: describeNonJson(response.status, text) }
+    const codeKey = upperFailure ?? upperStatus
+    if (codeKey === 'ALREADY_CLAIMED' || codeKey === 'REPLAYED') {
+      return { kind: 'already-claimed', message: '今天已领取' }
+    }
+    if (codeKey === 'SAME_PERSON_ALREADY_CLAIMED') {
+      return { kind: 'inactive', message: QODER_CAMPAIGN_FAILURE_CN.SAME_PERSON_ALREADY_CLAIMED }
+    }
+    if (codeKey !== undefined && QODER_CAMPAIGN_FAILURE_CN[codeKey] !== undefined) {
+      return { kind: 'failed', code: response.status, message: QODER_CAMPAIGN_FAILURE_CN[codeKey]! }
+    }
+    if (response.status === 401 || response.status === 403) {
+      return { kind: 'failed', code: response.status, message: describeNonJson(response.status, text) }
+    }
+    return { kind: 'failed', code: response.status, message: result.message ?? describeNonJson(response.status, text) }
   }
 
-  const result = parseClaimResult(body)
   // `replayed:true` = 本次活动此前已领（服务端回放上次结果）。
-  if (result.replayed === true) {
+  if (result.replayed === true || upperFailure === 'ALREADY_CLAIMED' || upperFailure === 'REPLAYED') {
     return { kind: 'already-claimed', message: '今天已领取' }
   }
-  if (result.status !== undefined && result.status !== 'CLAIMED') {
+  if (upperFailure === 'SAME_PERSON_ALREADY_CLAIMED') {
+    return { kind: 'inactive', message: QODER_CAMPAIGN_FAILURE_CN.SAME_PERSON_ALREADY_CLAIMED }
+  }
+  if (upperFailure !== undefined) {
+    return {
+      kind: 'failed',
+      code: -1,
+      message: QODER_CAMPAIGN_FAILURE_CN[upperFailure] ?? `领取未成功（${upperFailure}）`,
+    }
+  }
+  if (result.success === false) {
+    return {
+      kind: 'failed',
+      code: -1,
+      message: result.message ?? `领取未成功${result.status ? `（status=${result.status}）` : ''}`,
+    }
+  }
+  if (upperStatus !== undefined && upperStatus !== 'CLAIMED' && upperStatus !== 'GRANTED' && upperStatus !== 'SUCCESS') {
     return { kind: 'failed', code: -1, message: `领取未成功（status=${result.status}）` }
   }
   return { kind: 'claimed', credit: result.amount ?? 0, streakDays: 0, isStreakDay: false }
@@ -701,6 +760,23 @@ export async function claimQoderDailyCheckin(
       return { kind: 'already-claimed', message: '今天已领取' }
     }
 
+    const benefitReasons = parsed.campaigns
+      .filter((c) => c.actionType === 'CLAIM_BENEFIT' && c.unavailableReason !== undefined)
+      .map((c) => c.unavailableReason!.toUpperCase())
+    for (const reason of benefitReasons) {
+      if (reason === 'RISK_BLOCKED' || reason === 'RISK_DEPENDENCY_UNAVAILABLE') {
+        return { kind: 'failed', code: -1, message: QODER_CAMPAIGN_FAILURE_CN[reason]! }
+      }
+      if (
+        reason === 'SAME_PERSON_ALREADY_CLAIMED' ||
+        reason === 'REDEMPTION_CODE_OUT_OF_STOCK' ||
+        reason === 'ACHIEVEMENT_NOT_COMPLETED' ||
+        reason === 'CAMPAIGN_NOT_ACTIVE'
+      ) {
+        return { kind: 'inactive', message: QODER_CAMPAIGN_FAILURE_CN[reason]! }
+      }
+    }
+
     // 未开通时额外查一次用量（只读）以确认 —— 两条判据同时满足才提示，
     // 避免把「活动刚好刷新中」误报成「未开通」。
     const usage = await fetchQoderUsageRaw(credential, product, fetcher)
@@ -715,15 +791,21 @@ export async function claimQoderDailyCheckin(
 
   let total = 0
   let firstError: string | undefined
+  let anyAlreadyClaimed = false
+  let anyInactiveMsg: string | undefined
   for (const target of targets) {
     const outcome = await claimQoderCampaign(credential, product, target.campaignId, fetcher)
     if (outcome.kind === 'claimed') total += outcome.credit
     else if (outcome.kind === 'failed' && firstError === undefined) firstError = outcome.message
+    else if (outcome.kind === 'already-claimed') anyAlreadyClaimed = true
+    else if (outcome.kind === 'inactive' && anyInactiveMsg === undefined) anyInactiveMsg = outcome.message
   }
   // ⚠️ 三条返回都带 `stale`：刷新前领到的是**昨天那条**的补领 —— 它是一次
   // 真实动作（该如实报「领取成功」），但**不证明今天已被处理**，记账方必须
   // 能把这两种情况分开（否则当天 10 点刷新后的额度就没人领了）。
   if (total > 0) return { kind: 'claimed', credit: total, streakDays: 0, isStreakDay: false, ...stale }
   if (firstError !== undefined) return { kind: 'failed', code: -1, message: firstError }
+  if (anyAlreadyClaimed) return { kind: 'already-claimed', message: '今天已领取', ...stale }
+  if (anyInactiveMsg !== undefined) return { kind: 'inactive', message: anyInactiveMsg }
   return { kind: 'already-claimed', message: '今天已领取', ...stale }
 }
