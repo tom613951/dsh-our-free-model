@@ -40,13 +40,13 @@ export function stageDesktopService(destination, { requireWorkspace = false } = 
   // The model workspace runs the same pinned engine the plugin ships, so the
   // desktop build carries that binary and its manifest. `src/magpie-engine.js`
   // resolves `../vendor/magpie/` from its own directory, which inside this
-  // staged tree is `resources/vendor/magpie/`.
-  for (const name of ['engine.json', 'LICENSE', 'NOTICE.md']) copy(`vendor/magpie/${name}`, `../vendor/magpie/${name}`)
+  // staged tree is `resources/service/vendor/magpie/`, under Tauri's service resource root.
+  for (const name of ['engine.json', 'LICENSE', 'NOTICE.md']) copy(`vendor/magpie/${name}`)
   const target = `${process.platform}-${process.arch}`
   const binaries = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'vendor/magpie/engine.json'), 'utf8')).binaries ?? {}
   const binary = binaries[target]
   if (binary && typeof binary.path === 'string') {
-    copy(`vendor/magpie/${binary.path}`, `../vendor/magpie/${binary.path}`)
+    copy(`vendor/magpie/${binary.path}`)
   } else if (requireWorkspace) {
     // A real installer without the engine ships a workspace page that can never
     // start, so packaging refuses. Staging alone (tests, source inspection) may
