@@ -430,7 +430,16 @@ async function createGlue(): Promise<Glue> {
    * `&str` parameters **by ownership** (wasm-bindgen passes `String`, and the
    * Rust side drops it before returning), so the wasm already released them.
    * Freeing again here is a double free: the Rust allocator panics and the
-   * whole instantiation traps with `RuntimeError: unreachable` (#895).
+   * whole instantiation traps with `RuntimeError: unreachable`, which surfaces
+   * at the plugin boundary as a bare `unreachable` error with no code — the
+   * request never leaves the machine (issue #895).
+   *
+   * Evidence (measured with the shipped `qoder-auth-wasm.wasm`, no account
+   * needed): calling an export and then freeing the same pointer panics every
+   * time, while handing 100 × 200 KiB inputs to an export leaves the heap flat
+   * — the wasm does reclaim them. The real per-request growth issue #826 saw
+   * came from `QoderContext` / `RequestResult` (see `dispose` and
+   * `prepareInfer`), not from input buffers.
    */
   const withStrings = <T>(texts: string[], invoke: (pointers: number[], lengths: number[]) => T): T => {
     const pointers: number[] = []
@@ -616,9 +625,6 @@ export async function decryptModelCatalog(encrypted: string, machineId: string):
  * 加密推理请求。实例**不是**线程安全的；一个账号一个实例即可。
  */
 export class QoderEncryptedInfer {
-  /** `dispose()` 是否已释放 context —— 防止重复释放（wasm 侧不保证幂等）。 */
-  private disposed = false
-
   private constructor(
     private readonly g: Glue,
     private readonly context: number,
@@ -626,6 +632,9 @@ export class QoderEncryptedInfer {
     /** 加密端点所在 host（`agent_chat_generation`）。 */
     private readonly host: string,
   ) {}
+
+  /** `dispose()` 是否已释放 context —— 防止重复释放（wasm 侧不保证幂等）。 */
+  private disposed = false
 
   /** 创建客户端（会调 WASM 构造 `QoderContext`）。 */
   static async create(options: {
@@ -700,7 +709,14 @@ export class QoderEncryptedInfer {
         out = outPtr ? g.readString(outPtr, outLen) : ''
       } finally {
         g.exports.__wbindgen_add_to_stack_pointer!(16)
-        // 返回值字符串由 JS 接管所有权，与 `callString` 同源释放；输入缓冲由 Rust 释放。
+        // The url/body buffers are allocated by the wasm side and never freed
+        // by it — `callString` already frees its return value the same way, and
+        // leaving these leaked grew the heap once per inference request (#826).
+        //
+        // ⚠️ Inline `__wbindgen_export4` rather than a `g.freeString` helper:
+        // the helper was for **input** buffers, whose ownership sits in Rust, and
+        // freeing those traps (#895). A *returned* buffer is owned by JS here,
+        // exactly like `callString`'s finally block, so freeing is correct.
         if (outPtr) g.exports.__wbindgen_export4!(outPtr, outLen, 1)
       }
       return out
@@ -712,7 +728,6 @@ export class QoderEncryptedInfer {
       if (headerMap instanceof Map) {
         for (const [k, v] of headerMap) headers[String(k)] = String(v)
       }
-
       return {
         // ⚠️ 参数顺序：(栈指针, ptr) —— 与直觉相反
         url: readResultString((stack, ptr) => g.exports.requestresult_url!(stack, ptr)),
@@ -725,7 +740,13 @@ export class QoderEncryptedInfer {
   }
 
   /**
-   * 释放当前实例持有的 WASM `QoderContext`（幂等）。
+   * Release the wasm `QoderContext` this client owns.
+   *
+   * A client is built per request and then dropped (`buildRequest` in the
+   * adapter), so without this the context's wasm allocations are never
+   * returned — measured at ~3 KiB of linear memory per request, which only ever
+   * grows (issue #826). `qodercontext_new` and `__wbg_qodercontext_free` exist
+   * as a pair for exactly this. Idempotent: a second call is a no-op.
    */
   dispose(): void {
     if (this.disposed) return

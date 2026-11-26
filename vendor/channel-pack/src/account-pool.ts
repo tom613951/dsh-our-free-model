@@ -926,6 +926,7 @@ export class AccountPool {
   ): Promise<{ entry: ProviderAccountEntry; credential: StoredTokenCredential } | null> {
     const candidates = this.readAccounts()
       .filter(a => a.provider === provider && a.enabled)
+      .filter(a => (a.suspendedUntil ?? 0) <= Date.now())
       .filter(a => excludeAccountIds === undefined || !excludeAccountIds.has(a.id))
       .filter(a => {
         // 空 modelId（未知目标模型）：无可比对的键，保持候选不变。
@@ -1003,7 +1004,7 @@ export class AccountPool {
    * ⇒ 这里取「更长者」。真值被丢掉的风险不用担心：所有调用方写入的都是**未来**
    * 时刻，而过期的标记由 {@link sweepExpiredRateLimits} 清理。
    */
-  async updateModelRateLimit(accountId: string, modelId: string, resetAtMs: number): Promise<void> {
+  async updateModelRateLimit(accountId: string, modelId: string, resetAtMs: number, accountSuspended = false): Promise<void> {
     const accounts = this.readAccounts()
     const idx = accounts.findIndex(a => a.id === accountId)
     if (idx === -1) {
@@ -1025,7 +1026,7 @@ export class AccountPool {
     const current = accounts[idx]!.modelRateLimits?.[modelId]
     // ⚠️ 判据用 `>=`：相等时无需写盘（省一次 IO），语义上也无差别。
     // 现值非有限（旧数据损坏）时**允许**被新值修掉 —— 那正是写它的机会。
-    if (Number.isFinite(current) && current! >= resetAtMs) {
+    if (Number.isFinite(current) && current! >= resetAtMs && (!accountSuspended || (accounts[idx]!.suspendedUntil ?? 0) >= resetAtMs)) {
       this.ctx.logger?.info?.(
         `[channel-pack] updateModelRateLimit: 账号 ${accountId} 模型 ${modelId} 已有更长的限流标记 `
         + `(${new Date(current!).toISOString()} ≥ ${new Date(resetAtMs).toISOString()})，本次不覆盖`,
@@ -1034,7 +1035,8 @@ export class AccountPool {
     }
     const next = [...accounts]
     const entry = { ...next[idx]! }
-    entry.modelRateLimits = { ...entry.modelRateLimits, [modelId]: resetAtMs }
+    entry.modelRateLimits = { ...entry.modelRateLimits, [modelId]: Math.max(Number.isFinite(current) ? current! : 0, resetAtMs) }
+    if (accountSuspended) entry.suspendedUntil = Math.max(entry.suspendedUntil ?? 0, resetAtMs)
     next[idx] = entry
     await this.writeAccounts(next)
     this.ctx.logger?.info?.(

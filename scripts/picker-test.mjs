@@ -16,7 +16,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, getEventListeners } from 'node:events'
 import { chatFrames, callRoute, FakeRequest, fakeContext, freePort, stubUpstream, until } from './lib/fake-kernel.mjs'
 
 let failures = 0
@@ -215,14 +215,22 @@ check('it keeps the refused models rather than dropping them', (await advertised
 check('and the refusals are on record for the user to read', probeStore().results['deepseek-v4-flash-free']?.state, 'unavailable')
 const visibleId = 'space-bunny-free'
 const beforeVisibilityEvents = ctx.__captured.events.filter(event => event === 'emit:llm/adapters-updated').length
-const hiddenSave = await callRoute(api(), 'POST', '/api/our-free-model/settings', { hiddenModelIds: [visibleId, visibleId], hideEacModels: true })
+const hiddenSave = await callRoute(api(), 'POST', '/api/our-free-model/settings', {
+  hiddenModelIds: [visibleId, visibleId, 'unrelated-hidden-probe'], hideEacModels: true,
+})
 check('picker visibility settings save successfully', hiddenSave.status, 200)
-check('hidden ids are canonical and persisted', JSON.parse(fs.readFileSync(path.join(scratch, 'our-free-model', 'settings.json'), 'utf8')).hiddenModelIds, [visibleId])
+check('hidden ids are canonical and persisted', JSON.parse(fs.readFileSync(path.join(scratch, 'our-free-model', 'settings.json'), 'utf8')).hiddenModelIds, [visibleId, 'unrelated-hidden-probe'])
 check('refusedAll never restores an explicitly hidden model', (await advertised(ROUTE_MAIN)).includes(visibleId), false)
 check('visibility changes broadcast topology invalidation',
   ctx.__captured.events.filter(event => event === 'emit:llm/adapters-updated').length > beforeVisibilityEvents, true)
 const hiddenSummary = (await callRoute(api(), 'GET', '/api/our-free-model/summary')).json
 check('management keeps hidden rows with a recovery marker', hiddenSummary.catalog.find(row => row.id === visibleId)?.hiddenByUser, true)
+check('a hidden row carries only the stored ids in its model family',
+  hiddenSummary.catalog.find(row => row.id === visibleId)?.hiddenIds, [visibleId])
+check('and never receives the whole settings blacklist',
+  hiddenSummary.catalog.find(row => row.id === visibleId)?.hiddenIds.includes('unrelated-hidden-probe'), false)
+check('an unhidden row carries an empty family list',
+  hiddenSummary.catalog.find(row => row.id === 'mimo-v2.6-flash-free')?.hiddenIds, [])
 check('a hidden id still resolves for history', (await adapter.resolveModel(ROUTE_MAIN, visibleId)).id, visibleId)
 for (const patch of [null, [], { hiddenModelIds: [null] }, { hiddenModelIds: [''] }, { hideEacModels: 1 }, { hideFreeModels: 'true' }, { enabled: false, hiddenModelIds: [3] }]) {
   check('invalid visibility patch is refused atomically', (await callRoute(api(), 'POST', '/api/our-free-model/settings', patch)).status, 400)
@@ -310,18 +318,36 @@ check('the settings route accepts the desktop relay before connection appears',
   (await callRoute(api(), 'GET', '/api/our-free-model/summary', undefined, desktopHeaders)).status, 200)
 const events = routes.find(route => route.kind === 'exact' && route.path === '/api/our-free-model/events')?.handler
 if (events === undefined) throw new Error('events route was not registered')
-const eventReq = Object.assign(new EventEmitter(), new FakeRequest('GET', '/api/our-free-model/events', undefined, desktopHeaders))
-let eventStatus = 0
-let eventBody = ''
-const eventRes = Object.assign(new EventEmitter(), {
-  writeHead(status) { eventStatus = status },
-  write(text) { eventBody += text },
-  end() {},
-})
-events(eventReq, eventRes)
-check('the events route accepts the desktop relay', eventStatus, 200)
-check('and sends the initial snapshot', eventBody.includes('event: hello'), true)
-eventRes.emit('close')
+function openEvents(peer) {
+  const req = Object.assign(new EventEmitter(), new FakeRequest('GET', '/api/our-free-model/events', undefined, desktopHeaders))
+  const res = Object.assign(new EventEmitter(), {
+    status: 0,
+    body: '',
+    writableEnded: false,
+    writeHead(status) { this.status = status },
+    write(text) { this.body += text },
+    end() { this.writableEnded = true },
+  })
+  events(req, res, peer)
+  return res
+}
+const desktopEvents = openEvents()
+check('the events route accepts the desktop relay', desktopEvents.status, 200)
+check('and sends the initial snapshot', desktopEvents.body.includes('event: hello'), true)
+desktopEvents.emit('close')
+
+const peerController = new AbortController()
+const peer = { principal: { kind: 'owner' }, signal: peerController.signal }
+const ownerEvents = openEvents(peer)
+check('a Host-admitted owner receives an open event stream', [ownerEvents.status, ownerEvents.writableEnded], [200, false])
+peerController.abort()
+check('ending the owner Peer closes its event stream', ownerEvents.writableEnded, true)
+
+const disconnectController = new AbortController()
+const disconnectedEvents = openEvents({ ...peer, signal: disconnectController.signal })
+check('an event stream listens to its owner Peer', getEventListeners(disconnectController.signal, 'abort').length, 1)
+disconnectedEvents.emit('close')
+check('a disconnected event stream releases the Peer listener', getEventListeners(disconnectController.signal, 'abort').length, 0)
 
 ctx.__services.connection.admit = () => ({ rejection: 401 })
 ctx.__mountService('connection')

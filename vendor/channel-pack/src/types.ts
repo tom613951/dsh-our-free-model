@@ -61,6 +61,7 @@ export interface ProviderAccountEntry {
   refreshable: boolean
   /** 每个模型的重置时间，key=模型ID（毫秒时间戳） */
   modelRateLimits?: Record<string, number>
+  suspendedUntil?: number
   /**
    * TRAE 签到设备轮换代次（仅 `trae` provider 使用）。
    *

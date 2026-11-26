@@ -4114,7 +4114,11 @@ window.__ModuleLoader__.load({
       const unlisted = lead(roster.filter(m => m.route !== 'our-free-model' && m.route !== 'our-free-model-region'))
       const toggleModel = onApply === undefined ? undefined : model => {
         const ids = summary.settings.hiddenModelIds ?? []
-        return onApply({ hiddenModelIds: ids.includes(model.id) ? ids.filter(id => id !== model.id) : [...ids, model.id] })
+        if (model.hiddenByUser === true) {
+          const hidden = new Set(Array.isArray(model.hiddenIds) && model.hiddenIds.length > 0 ? model.hiddenIds : [model.id])
+          return onApply({ hiddenModelIds: ids.filter(id => !hidden.has(id)) })
+        }
+        return onApply({ hiddenModelIds: ids.includes(model.id) ? ids : [...ids, model.id] })
       }
       // 只有拿到过明确判定（网关答过 /eac/status）且未授权时才上锁：状态未知
       // 不该显示一把凭空的锁，网关不可达时本地记录仍算已授权。
@@ -8031,7 +8035,13 @@ window.__ModuleLoader__.load({
     // upgrader triggers — comes back to the page the user was reading.
     const EFFECTS_KEY = 'ofm.visualEffects'
     const TAB_KEY = 'ofm.tab'
-    const TABS = ['free', 'eac', 'channels', 'aggregate', 'workspace', 'extensions', 'saver', 'routing', 'ledger', 'logs', 'gateway', 'upgrade', 'picks', 'feedback']
+    // The replacement gateway does not run the feedback collector, and the old
+    // Beichen host is being retired. Keep the page implementation for a future
+    // self-hosted collector, but do not advertise an entry that can only fail:
+    // the server half still honours an explicit `settings.feedbackUrl`.
+    const FEEDBACK_ENABLED = false
+    const TABS = ['free', 'eac', 'channels', 'aggregate', 'workspace', 'extensions', 'saver', 'routing', 'ledger', 'logs', 'gateway', 'upgrade', 'picks']
+    if (FEEDBACK_ENABLED) TABS.push('feedback')
     const WORKSPACE_CSS = `
       .who{min-width:0}
       .who .name,.nm .n,.lib-path{white-space:normal!important;overflow-wrap:anywhere;overflow:visible!important;text-overflow:clip!important}
@@ -8336,7 +8346,7 @@ window.__ModuleLoader__.load({
         ['gateway', t('nav.tab.gateway'), null],
         ['upgrade', t('nav.tab.upgrade'), null],
         ['picks', t('nav.tab.picks'), null],
-        ['feedback', t('nav.tab.feedback'), null],
+        ...(FEEDBACK_ENABLED ? [['feedback', t('nav.tab.feedback'), null]] : []),
       ]
       const nav = h('nav', { className: 'ofm_nav' },
         h('span', { className: 'ofm_navbrand' },
@@ -8386,7 +8396,7 @@ window.__ModuleLoader__.load({
                       ? h(UpgradePage, { t, settings: data.settings, onApply: apply, busy })
                     : tab === 'picks'
                       ? h(PicksPage, { t, effects })
-                    : tab === 'feedback'
+                    : tab === 'feedback' && FEEDBACK_ENABLED
                       ? h(FeedbackPage, { t, version: data.version })
                     : tab === 'eac'
                       ? h(EacPage, { t, data, counts, summary, stats, eacAuth, setEacAuth, eacLogin, busy, catalogBusy, apply, bench, benches, refresh, reprobe })

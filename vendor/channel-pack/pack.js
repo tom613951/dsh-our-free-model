@@ -32250,7 +32250,7 @@ var AccountPool = class {
    * 「池认为最优的一个」，无法枚举候选自己去重。
    */
   async getAvailableAccount(provider, modelId, excludeAccountIds) {
-    const candidates = this.readAccounts().filter((a) => a.provider === provider && a.enabled).filter((a) => excludeAccountIds === void 0 || !excludeAccountIds.has(a.id)).filter((a) => {
+    const candidates = this.readAccounts().filter((a) => a.provider === provider && a.enabled).filter((a) => (a.suspendedUntil ?? 0) <= Date.now()).filter((a) => excludeAccountIds === void 0 || !excludeAccountIds.has(a.id)).filter((a) => {
       if (modelId.length === 0) return true;
       if (!a.modelRateLimits) return true;
       const resetAt = a.modelRateLimits[modelId];
@@ -32312,7 +32312,7 @@ var AccountPool = class {
    * ⇒ 这里取「更长者」。真值被丢掉的风险不用担心：所有调用方写入的都是**未来**
    * 时刻，而过期的标记由 {@link sweepExpiredRateLimits} 清理。
    */
-  async updateModelRateLimit(accountId, modelId, resetAtMs) {
+  async updateModelRateLimit(accountId, modelId, resetAtMs, accountSuspended = false) {
     const accounts = this.readAccounts();
     const idx = accounts.findIndex((a) => a.id === accountId);
     if (idx === -1) {
@@ -32328,7 +32328,7 @@ var AccountPool = class {
       return;
     }
     const current = accounts[idx].modelRateLimits?.[modelId];
-    if (Number.isFinite(current) && current >= resetAtMs) {
+    if (Number.isFinite(current) && current >= resetAtMs && (!accountSuspended || (accounts[idx].suspendedUntil ?? 0) >= resetAtMs)) {
       this.ctx.logger?.info?.(
         `[channel-pack] updateModelRateLimit: \u8D26\u53F7 ${accountId} \u6A21\u578B ${modelId} \u5DF2\u6709\u66F4\u957F\u7684\u9650\u6D41\u6807\u8BB0 (${new Date(current).toISOString()} \u2265 ${new Date(resetAtMs).toISOString()})\uFF0C\u672C\u6B21\u4E0D\u8986\u76D6`
       );
@@ -32336,7 +32336,8 @@ var AccountPool = class {
     }
     const next = [...accounts];
     const entry = { ...next[idx] };
-    entry.modelRateLimits = { ...entry.modelRateLimits, [modelId]: resetAtMs };
+    entry.modelRateLimits = { ...entry.modelRateLimits, [modelId]: Math.max(Number.isFinite(current) ? current : 0, resetAtMs) };
+    if (accountSuspended) entry.suspendedUntil = Math.max(entry.suspendedUntil ?? 0, resetAtMs);
     next[idx] = entry;
     await this.writeAccounts(next);
     this.ctx.logger?.info?.(
@@ -38796,6 +38797,25 @@ var LOBSTERAI_BANNED_MARKERS = [
   "\u8D26\u53F7\u5DF2\u88AB\u9650\u5236",
   "\u98CE\u63A7"
 ];
+var LOBSTERAI_SUSPENDED_SUBJECT = "\u6682\u65F6\u65E0\u6CD5\u4F7F\u7528\u76F8\u5173\u670D\u52A1";
+var LOBSTERAI_SUSPENDED_ATTRIBUTIONS = [
+  "\u7B2C\u4E09\u65B9\u53CD\u5411\u4EE3\u7406",
+  "\u63D2\u4EF6\u8F6C\u63A5",
+  "\u5171\u4EAB\u672C\u8D26\u53F7\u7684\u670D\u52A1\u989D\u5EA6",
+  "\u5F02\u5E38\u4F7F\u7528"
+];
+function isLobsteraiSuspendedNotice(body) {
+  if (!body.includes(LOBSTERAI_SUSPENDED_SUBJECT)) return false;
+  if (!LOBSTERAI_SUSPENDED_ATTRIBUTIONS.some((marker) => body.includes(marker))) return false;
+  return body.includes("\u9884\u8BA1\u4E8E") && body.includes("\u6062\u590D") || body.includes("\u6C38\u4E45\u505C\u7528");
+}
+var LOBSTERAI_SUSPENDED_RESUME_PATTERN = /预计于\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s*\((UTC[+-]\d{1,2}(?::\d{2})?)\)\s*恢复/;
+function parseLobsteraiSuspendedResetAt(text) {
+  const match = LOBSTERAI_SUSPENDED_RESUME_PATTERN.exec(text);
+  if (!match) return null;
+  const parsed = Date.parse(`${match[1]} ${match[2]}`);
+  return Number.isNaN(parsed) ? null : parsed;
+}
 var HTTP_PAYMENT_REQUIRED = 402;
 var HTTP_TOO_MANY_REQUESTS = 429;
 var HTTP_NOT_FOUND = 404;
@@ -38805,6 +38825,7 @@ function classifyLobsteraiError(status, body) {
   for (const marker of LOBSTERAI_HARD_CREDIT_MARKERS) {
     if (lower.includes(marker.toLowerCase()) || body.includes(marker)) return "hard-credit";
   }
+  if (isLobsteraiSuspendedNotice(body)) return "suspended";
   for (const marker of LOBSTERAI_BANNED_MARKERS) {
     if (lower.includes(marker.toLowerCase()) || body.includes(marker)) return "banned";
   }
@@ -38822,10 +38843,11 @@ function classifyLobsteraiStreamError(message2) {
   return byKeyword === "none" ? "client" : byKeyword;
 }
 function shouldRotateLobsteraiAccount(kind) {
+  if (kind === "banned" || kind === "suspended") return false;
   return kind !== "none";
 }
 function recordsLobsteraiRateLimit(kind) {
-  return kind === "hard-credit" || kind === "soft-rate" || kind === "not-found" || kind === "banned";
+  return kind === "hard-credit" || kind === "soft-rate" || kind === "not-found" || kind === "banned" || kind === "suspended";
 }
 function isLobsteraiTerminalError(kind) {
   return kind === "session-dead";
@@ -39067,6 +39089,15 @@ function buildLobsteraiFailure(input) {
   if (kind === "hard-credit") {
     const prefix = exhausted ? `lobsterai: \u6A21\u578B ${model} \u6240\u6709\u8D26\u53F7\u5747\u4E0D\u53EF\u7528` : "lobsterai: \u79EF\u5206\u4E0D\u8DB3";
     return new LlmError6(`${prefix}\uFF08${detail}\uFF09`, "QUOTA_EXCEEDED", { status });
+  }
+  if (kind === "suspended") {
+    const resetAtMs = parseLobsteraiSuspendedResetAt(text);
+    const when = resetAtMs === null ? "\u4E0A\u6E38\u672A\u7ED9\u51FA\u53EF\u89E3\u6790\u7684\u6062\u590D\u65F6\u523B" : `\u9884\u8BA1 ${new Date(resetAtMs).toLocaleString("zh-CN")} \u6062\u590D`;
+    return new LlmError6(
+      `lobsterai: \u8D26\u53F7\u88AB\u4E0A\u6E38\u98CE\u63A7\u6682\u65F6\u505C\u7528\uFF0C${when}\uFF1B\u8BF7\u907F\u514D\u8FDE\u7EED\u91CD\u8BD5\uFF0C\u5E76\u6539\u7528\u6709\u9053\u9F99\u867E\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u7F51\u8BBF\u95EE\uFF08${detail}\uFF09`,
+      "PERMISSION",
+      { status: status === 0 ? 403 : status }
+    );
   }
   if (kind === "banned") {
     return new LlmError6(
@@ -39350,6 +39381,10 @@ var LobsteraiAdapter = class extends LlmAdapter3 {
         console.warn("[lobsterai] \u8D26\u53F7\u5339\u914D\u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u672C\u6B21\u8BF7\u6C42\uFF09:", error);
       }
     }
+    const suspendedUntil = this.options.accountPool?.findAccount?.(currentAccountId)?.suspendedUntil;
+    if (suspendedUntil && suspendedUntil > Date.now()) {
+      throw new LlmError6(`lobsterai: \u8D26\u53F7\u6682\u65F6\u505C\u7528\uFF0C\u9884\u8BA1 ${new Date(suspendedUntil).toLocaleString("zh-CN")} \u6062\u590D`, "PERMISSION", { status: 403 });
+    }
     const messages = serializeMessages3(options.messages, imageUrls);
     if (options.system !== void 0 && options.system.length > 0) {
       messages.unshift({ role: "system", content: options.system });
@@ -39414,14 +39449,14 @@ var LobsteraiAdapter = class extends LlmAdapter3 {
       }
       if (currentAccountId && recordsLobsteraiRateLimit(lastKind)) {
         const parsed = parseRateLimitError2(lastText, options.model);
+        const suspendedResetAtMs = lastKind === "suspended" ? parseLobsteraiSuspendedResetAt(lastText) : null;
         await this.options.accountPool.updateModelRateLimit(
           currentAccountId,
           parsed?.modelId ?? options.model,
-          // `parseRateLimitError` 内部要求错误体是 JSON（它 `JSON.parse` 取 msg），
-          // 而部分上游/网关会用**纯文本** 429。此时它返回 null，这里用
-          // 「1 小时后」兜底 —— 与它自己 JSON 路径下的 fallback 同一口径，
-          // 也与本插件「标记只是快照、可主动重测」的语义一致。
-          parsed?.resetTimeMs ?? Date.now() + LOBSTERAI_RATE_LIMIT_FALLBACK_MS
+          // 三条取值都失败时的兜底：1 小时后，与 `parseRateLimitError` 自己的
+          // JSON fallback 同一口径，也与「标记只是快照、可主动重测」的语义一致。
+          suspendedResetAtMs ?? parsed?.resetTimeMs ?? Date.now() + LOBSTERAI_RATE_LIMIT_FALLBACK_MS,
+          lastKind === "suspended"
         );
       }
       if (!this.options.accountPool || !shouldRotateLobsteraiAccount(lastKind)) {
@@ -39432,16 +39467,6 @@ var LobsteraiAdapter = class extends LlmAdapter3 {
           model: options.model,
           fromStream: lastFromStream,
           exhausted: false
-        });
-      }
-      if (lastKind === "banned") {
-        throw buildLobsteraiFailure({
-          kind: lastKind,
-          status: lastStatus,
-          text: lastText,
-          model: options.model,
-          fromStream: lastFromStream,
-          exhausted: true
         });
       }
       if (attempt >= LOBSTERAI_MAX_ROTATE - 1) {
@@ -40275,7 +40300,13 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
     }
   }
   /**
-   * 释放当前实例持有的 WASM `QoderContext`（幂等）。
+   * Release the wasm `QoderContext` this client owns.
+   *
+   * A client is built per request and then dropped (`buildRequest` in the
+   * adapter), so without this the context's wasm allocations are never
+   * returned — measured at ~3 KiB of linear memory per request, which only ever
+   * grows (issue #826). `qodercontext_new` and `__wbg_qodercontext_free` exist
+   * as a pair for exactly this. Idempotent: a second call is a no-op.
    */
   dispose() {
     if (this.disposed) return;
@@ -42712,6 +42743,7 @@ function parseTraeSSELine(eventName, dataLine) {
   } catch {
     return { event };
   }
+  if (raw === null) return { event };
   throwIfModelQueued(raw);
   const ev = { event };
   switch (event) {
@@ -42738,8 +42770,9 @@ function parseTraeSSELine(eventName, dataLine) {
   return ev;
 }
 function normalizeTraeToolCalls(calls) {
-  return calls.map((call) => {
-    if (typeof call !== "object" || call === null) return call;
+  const normalized = [];
+  for (const call of calls) {
+    if (typeof call !== "object" || call === null) continue;
     const c = { ...call };
     if (typeof c.function_call === "object" && c.function_call !== null) {
       c.function = { ...c.function_call };
@@ -42750,8 +42783,9 @@ function normalizeTraeToolCalls(calls) {
       delete fn.namespace;
       delete fn.partial_arguments;
     }
-    return c;
-  });
+    normalized.push(c);
+  }
+  return normalized;
 }
 
 // vendor/channel-pack/src/trae-errors.ts
@@ -43026,6 +43060,16 @@ function traeCacheReadTokens(usage) {
   const openai = usage.prompt_cache_hit_tokens;
   if (typeof openai === "number" && openai > 0) return openai;
   return 0;
+}
+function isCompleteJsonObject(raw) {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return false;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
 }
 function traeDisplayName(model) {
   const rate = model.creditsRate;
@@ -43535,6 +43579,7 @@ var TraeAdapter = class extends LlmAdapter5 {
     const toolIds = /* @__PURE__ */ new Map();
     let buffer = "";
     let streamEnded = false;
+    let eofReached = false;
     let finishReason2;
     let currentEvent = "";
     let currentData = "";
@@ -43560,17 +43605,29 @@ var TraeAdapter = class extends LlmAdapter5 {
           }
           throw error;
         }
-        if (result.done) break;
-        buffer += decoder2.decode(result.value, { stream: true });
+        if (result.done) {
+          buffer += decoder2.decode();
+          buffer += "\n\n";
+          eofReached = true;
+        } else {
+          buffer += decoder2.decode(result.value, { stream: true });
+        }
         let newline;
         while ((newline = buffer.indexOf("\n")) !== -1) {
           const line2 = buffer.slice(0, newline);
           buffer = buffer.slice(newline + 1);
           if (line2.trim().length === 0) {
             if (currentEvent.length > 0) {
-              const ev = parseTraeSSELine(currentEvent, currentData);
+              const isEofTail = eofReached;
+              const rawEvent = currentEvent;
+              const rawData = currentData;
               currentEvent = "";
               currentData = "";
+              if (isEofTail && rawEvent.trim() === "done" && !isCompleteJsonObject(rawData)) {
+                sawAnyUpstreamEvent = true;
+                continue;
+              }
+              const ev = parseTraeSSELine(rawEvent, rawData);
               if (ev === void 0) continue;
               sawAnyUpstreamEvent = true;
               switch (ev.event) {
@@ -43719,6 +43776,7 @@ var TraeAdapter = class extends LlmAdapter5 {
           });
           break;
         }
+        if (eofReached) break;
       }
     } finally {
       await reader.cancel().catch(() => {
@@ -43790,12 +43848,13 @@ var TraeAdapter = class extends LlmAdapter5 {
     const argsTruncated = [...toolCalls.values()].some((block) => isTruncatedArguments(block.text));
     const droppedUnnamedCalls = [...toolCalls.values()].some((block) => !block.announced);
     const proseCutByStopString = finishReason2 === "stop" && toolOrder.length === 0 && isProseTruncatedByStopString(emittedProse);
+    const truncatedStream = finishReason2 === void 0 && !streamEnded && blockCount > 0;
     const reasoningLoopIsSoleOutput = loopDetected && emittedProse === "" && toolOrder.length === 0;
     const reason = reasoningLoopIsSoleOutput ? { kind: "error", failure: reasoningLoopFailure(
       loopGuard?.diagnostics,
       options.maxTokens,
       "reasoning"
-    ) } : loopDetected ? { kind: "max-tokens" } : finishReason2 === "length" || finishReason2 === void 0 && toolOrder.length > 0 || argsTruncated || proseCutByStopString || droppedUnnamedCalls && toolOrder.length === 0 ? { kind: "max-tokens" } : finishReason2 === "tool_calls" || toolOrder.length > 0 ? { kind: "tool-calls" } : { kind: "stop" };
+    ) } : loopDetected ? { kind: "max-tokens" } : finishReason2 === "length" || finishReason2 === void 0 && toolOrder.length > 0 || argsTruncated || proseCutByStopString || truncatedStream || droppedUnnamedCalls && toolOrder.length === 0 ? { kind: "max-tokens" } : finishReason2 === "tool_calls" || toolOrder.length > 0 ? { kind: "tool-calls" } : { kind: "stop" };
     yield { type: "finish", reason: resolveEmptyResponseReason(reason, blockCount) };
   }
 };

@@ -976,8 +976,13 @@ function failOnce(res, error) {
 /**
  * Connect to `upstream` through `outlet` and return a socket ready for plain
  * http framing — already TLS-wrapped when the target is https.
+ *
+ * `tlsOptions.ca` applies to the **target** handshake only. The proxy's own
+ * https handshake in `httpConnect` stays on Node's default trust store: a
+ * caller pinning a private gateway root must not also pin the proxy's public
+ * certificate chain.
  */
-export async function openTunnel(upstream, outlet, onSocket) {
+export async function openTunnel(upstream, outlet, onSocket, { ca } = {}) {
   const isTls = upstream.protocol === 'https:'
   const host = upstream.hostname
   const port = Number(upstream.port) || (isTls ? 443 : 80)
@@ -994,9 +999,14 @@ export async function openTunnel(upstream, outlet, onSocket) {
   return await withTimeout(new Promise((resolve, reject) => {
     const secured = tls.connect({
       socket,
-      // An IP literal has no name to assert; the lane's hosts are names.
-      servername: net.isIP(host) === 0 ? host : undefined,
+      // `servername` is SNI, which an IP literal must not send. It is also the
+      // default identity Node verifies; for an IP target the `host` option
+      // supplies that identity so the certificate's IP SAN is checked. Without
+      // one of the two, Node compares against an empty DNS name and every
+      // IP-only certificate fails.
+      ...(net.isIP(host) === 0 ? { servername: host } : { host }),
       ALPNProtocols: ['http/1.1'],
+      ...(ca === undefined ? {} : { ca }),
     })
     secured.once('secureConnect', () => resolve(secured))
     secured.once('error', error => { secured.destroy(); reject(error) })
@@ -1023,7 +1033,12 @@ async function httpConnect(proxy, targetHost, targetPort, onSocket) {
   try {
     if (proxy.protocol === 'https:') {
       socket = await withTimeout(new Promise((resolve, reject) => {
-        const secured = tls.connect({ socket, servername: net.isIP(proxy.hostname) === 0 ? proxy.hostname : undefined })
+        const secured = tls.connect({
+          socket,
+          // Same identity rule as the target handshake: SNI only for names,
+          // `host` only for an IP proxy so its IP SAN is still verified.
+          ...(net.isIP(proxy.hostname) === 0 ? { servername: proxy.hostname } : { host: proxy.hostname }),
+        })
         secured.once('secureConnect', () => resolve(secured))
         secured.once('error', error => { secured.destroy(); reject(error) })
         onSocket?.(secured)
