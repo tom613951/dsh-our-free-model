@@ -40054,21 +40054,14 @@ async function createGlue() {
     lastLength = encoded.length;
     return ptr;
   };
-  const freeString = (ptr, len) => {
-    if (ptr) exports.__wbindgen_export4(ptr, len, 1);
-  };
   const withStrings = (texts, invoke) => {
     const pointers = [];
     const lengths = [];
-    try {
-      for (const text of texts) {
-        pointers.push(writeString(text));
-        lengths.push(lastLength);
-      }
-      return invoke(pointers, lengths);
-    } finally {
-      for (let i = 0; i < pointers.length; i++) freeString(pointers[i], lengths[i]);
+    for (const text of texts) {
+      pointers.push(writeString(text));
+      lengths.push(lastLength);
     }
+    return invoke(pointers, lengths);
   };
   const callString = (invoke) => {
     let ptr = 0;
@@ -40168,7 +40161,6 @@ async function createGlue() {
     view,
     readString: readString8,
     writeString,
-    freeString,
     withStrings,
     lastLength: () => lastLength,
     heapObject,
@@ -40199,6 +40191,8 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
     this.metadata = metadata;
     this.host = host;
   }
+  /** `dispose()` 是否已释放 context —— 防止重复释放（wasm 侧不保证幂等）。 */
+  disposed = false;
   /** 创建客户端（会调 WASM 构造 `QoderContext`）。 */
   static async create(options) {
     const g = await getGlue();
@@ -40247,11 +40241,6 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
         );
       })
     );
-    const headerMap = g.takeObject(g.exports.requestresult_headers(result));
-    const headers = {};
-    if (headerMap instanceof Map) {
-      for (const [k, v] of headerMap) headers[String(k)] = String(v);
-    }
     const readResultString = (invoke) => {
       let out = "";
       let outPtr = 0;
@@ -40265,16 +40254,33 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
         out = outPtr ? g.readString(outPtr, outLen) : "";
       } finally {
         g.exports.__wbindgen_add_to_stack_pointer(16);
-        g.freeString(outPtr, outLen);
+        if (outPtr) g.exports.__wbindgen_export4(outPtr, outLen, 1);
       }
       return out;
     };
-    return {
-      // ⚠️ 参数顺序：(栈指针, ptr) —— 与直觉相反
-      url: readResultString((stack, ptr) => g.exports.requestresult_url(stack, ptr)),
-      headers,
-      body: readResultString((stack, ptr) => g.exports.requestresult_body(stack, ptr))
-    };
+    try {
+      const headerMap = g.takeObject(g.exports.requestresult_headers(result));
+      const headers = {};
+      if (headerMap instanceof Map) {
+        for (const [k, v] of headerMap) headers[String(k)] = String(v);
+      }
+      return {
+        // ⚠️ 参数顺序：(栈指针, ptr) —— 与直觉相反
+        url: readResultString((stack, ptr) => g.exports.requestresult_url(stack, ptr)),
+        headers,
+        body: readResultString((stack, ptr) => g.exports.requestresult_body(stack, ptr))
+      };
+    } finally {
+      g.exports.__wbg_requestresult_free(result);
+    }
+  }
+  /**
+   * 释放当前实例持有的 WASM `QoderContext`（幂等）。
+   */
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.context) this.g.exports.__wbg_qodercontext_free(this.context);
   }
 };
 
@@ -41579,33 +41585,37 @@ var QoderAdapter = class extends LlmAdapter4 {
         metadata: { ...this.product.clientMetadata },
         host: this.product.encryptedInferBase
       });
-      return client.prepareInfer({
-        modelKey: options.model,
-        userText,
-        ...systemText !== void 0 ? { systemText } : {},
-        isReasoning: fallback2?.supportsThinking ?? false,
-        history: history2,
-        // 工具定义：这是模型**唯一**能学到函数 schema 的通道，
-        // 缺了它模型只能用正文 XML 臆造调用（真实缺陷）。
-        tools,
-        ...options.maxTokens !== void 0 ? { maxTokens: options.maxTokens } : {},
-        ...options.reasoningEffort !== void 0 ? { reasoningEffort: options.reasoningEffort } : {},
-        ...fallback2?.supportsImage !== void 0 ? { isVl: fallback2.supportsImage } : {},
-        // 官方 `model_config` 的 display_name / max_input_tokens 必须带上。
-        ...fallback2?.name !== void 0 ? { displayName: fallback2.name } : {},
-        ...fallback2?.contextWindow !== void 0 ? { maxInputTokens: fallback2.contextWindow } : {},
-        // ⚠️ **`business` 必填**，否则服务端把请求路由到错误的后端节点。
-        //
-        // 实测（2026-09-20）：不带 `business` 时 `qfmodel`（Qwen3.8-Flash）
-        // 恒落到故障节点 `oa_qwen-plus-2025-04-28` 并返回
-        // `[FAIL]node:... msg:Execution failed`；补上 `business` 后立即正常
-        // （其余模型如 `qmodel_38max` 恰好不受影响，故早期排查易误判为
-        // 「该模型服务端故障」）。`agent` / `sec_scan` 等取值都能通。
-        //
-        // 源码依据：`MPi(A) { return A === 'sec_scan' ? 'security' : 'default' }`
-        // —— 服务端按 `business.type` 选路由池，缺字段会走异常分支。
-        business: { type: "agent" }
-      });
+      try {
+        return client.prepareInfer({
+          modelKey: options.model,
+          userText,
+          ...systemText !== void 0 ? { systemText } : {},
+          isReasoning: fallback2?.supportsThinking ?? false,
+          history: history2,
+          // 工具定义：这是模型**唯一**能学到函数 schema 的通道，
+          // 缺了它模型只能用正文 XML 臆造调用（真实缺陷）。
+          tools,
+          ...options.maxTokens !== void 0 ? { maxTokens: options.maxTokens } : {},
+          ...options.reasoningEffort !== void 0 ? { reasoningEffort: options.reasoningEffort } : {},
+          ...fallback2?.supportsImage !== void 0 ? { isVl: fallback2.supportsImage } : {},
+          // 官方 `model_config` 的 display_name / max_input_tokens 必须带上。
+          ...fallback2?.name !== void 0 ? { displayName: fallback2.name } : {},
+          ...fallback2?.contextWindow !== void 0 ? { maxInputTokens: fallback2.contextWindow } : {},
+          // ⚠️ **`business` 必填**，否则服务端把请求路由到错误的后端节点。
+          //
+          // 实测（2026-09-20）：不带 `business` 时 `qfmodel`（Qwen3.8-Flash）
+          // 恒落到故障节点 `oa_qwen-plus-2025-04-28` 并返回
+          // `[FAIL]node:... msg:Execution failed`；补上 `business` 后立即正常
+          // （其余模型如 `qmodel_38max` 恰好不受影响，故早期排查易误判为
+          // 「该模型服务端故障」）。`agent` / `sec_scan` 等取值都能通。
+          //
+          // 源码依据：`MPi(A) { return A === 'sec_scan' ? 'security' : 'default' }`
+          // —— 服务端按 `business.type` 选路由池，缺字段会走异常分支。
+          business: { type: "agent" }
+        });
+      } finally {
+        client.dispose();
+      }
     };
     const queueStartedAt = this.now();
     const queueTimeoutMs = resolveQueueTimeoutMs();

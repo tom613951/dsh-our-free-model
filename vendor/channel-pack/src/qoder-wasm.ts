@@ -340,10 +340,9 @@ interface Glue {
   readString: (ptr: number, len: number) => string
   /** 写字符串进 wasm 内存，返回指针（长度经 `lastLength` 传出）。 */
   writeString: (text: string) => number
-  /** 释放 `writeString` 分配的缓冲区（`__wbindgen_free` 的配对）。 */
-  freeString: (ptr: number, len: number) => void
   /**
-   * 分配若干输入串、执行调用、无论成败都释放它们。
+   * 分配若干输入串、执行调用。**不释放**这些缓冲区 —— Rust 侧按所有权接管
+   * 入参，JS 再 free 会双重释放（见实现处的注释与 #895）。
    * 回调收到的指针与长度按入参顺序排列。
    */
   withStrings: <T>(texts: string[], invoke: (pointers: number[], lengths: number[]) => T) => T
@@ -425,32 +424,22 @@ async function createGlue(): Promise<Glue> {
     return ptr
   }
   /**
-   * Free a buffer `writeString` allocated.
+   * Allocate, run, and hand every input buffer to the wasm export.
    *
-   * `__wbindgen_export2` is wasm-bindgen's `__wbindgen_malloc` and
-   * `__wbindgen_export4` its `__wbindgen_free` — the same pair `callString`
-   * already uses for the *returned* buffer. Every input buffer `writeString`
-   * hands to a wasm export leaked, because nothing ever called the free half
-   * (issue #826: the glue grew the wasm heap on each call and the leak was
-   * proportional to argument size). The wasm side copies the bytes it needs
-   * during the call, so freeing right after it returns is safe.
+   * ⚠️ **Do not free these buffers from JS.** The Qoder exports take their
+   * `&str` parameters **by ownership** (wasm-bindgen passes `String`, and the
+   * Rust side drops it before returning), so the wasm already released them.
+   * Freeing again here is a double free: the Rust allocator panics and the
+   * whole instantiation traps with `RuntimeError: unreachable` (#895).
    */
-  const freeString = (ptr: number, len: number): void => {
-    if (ptr) exports.__wbindgen_export4!(ptr, len, 1)
-  }
-  /** Allocate, run, and always free every input buffer written for the call. */
   const withStrings = <T>(texts: string[], invoke: (pointers: number[], lengths: number[]) => T): T => {
     const pointers: number[] = []
     const lengths: number[] = []
-    try {
-      for (const text of texts) {
-        pointers.push(writeString(text))
-        lengths.push(lastLength)
-      }
-      return invoke(pointers, lengths)
-    } finally {
-      for (let i = 0; i < pointers.length; i++) freeString(pointers[i], lengths[i])
+    for (const text of texts) {
+      pointers.push(writeString(text))
+      lengths.push(lastLength)
     }
+    return invoke(pointers, lengths)
   }
   const callString = (invoke: (stack: number) => void): string => {
     let ptr = 0
@@ -567,7 +556,6 @@ async function createGlue(): Promise<Glue> {
     view,
     readString,
     writeString,
-    freeString,
     withStrings,
     lastLength: () => lastLength,
     heapObject,
@@ -628,6 +616,9 @@ export async function decryptModelCatalog(encrypted: string, machineId: string):
  * 加密推理请求。实例**不是**线程安全的；一个账号一个实例即可。
  */
 export class QoderEncryptedInfer {
+  /** `dispose()` 是否已释放 context —— 防止重复释放（wasm 侧不保证幂等）。 */
+  private disposed = false
+
   private constructor(
     private readonly g: Glue,
     private readonly context: number,
@@ -696,12 +687,6 @@ export class QoderEncryptedInfer {
       }),
     )
 
-    const headerMap = g.takeObject(g.exports.requestresult_headers!(result))
-    const headers: Record<string, string> = {}
-    if (headerMap instanceof Map) {
-      for (const [k, v] of headerMap) headers[String(k)] = String(v)
-    }
-
     const readResultString = (invoke: (stack: number, ptr: number) => void): string => {
       let out = ''
       let outPtr = 0
@@ -715,20 +700,37 @@ export class QoderEncryptedInfer {
         out = outPtr ? g.readString(outPtr, outLen) : ''
       } finally {
         g.exports.__wbindgen_add_to_stack_pointer!(16)
-        // The url/body buffers are allocated by the wasm side and never freed
-        // by it — `callString` already frees its return value the same way, and
-        // leaving these leaked grew the heap once per inference request (#826).
-        g.freeString(outPtr, outLen)
+        // 返回值字符串由 JS 接管所有权，与 `callString` 同源释放；输入缓冲由 Rust 释放。
+        if (outPtr) g.exports.__wbindgen_export4!(outPtr, outLen, 1)
       }
       return out
     }
 
-    return {
-      // ⚠️ 参数顺序：(栈指针, ptr) —— 与直觉相反
-      url: readResultString((stack, ptr) => g.exports.requestresult_url!(stack, ptr)),
-      headers,
-      body: readResultString((stack, ptr) => g.exports.requestresult_body!(stack, ptr)),
+    try {
+      const headerMap = g.takeObject(g.exports.requestresult_headers!(result))
+      const headers: Record<string, string> = {}
+      if (headerMap instanceof Map) {
+        for (const [k, v] of headerMap) headers[String(k)] = String(v)
+      }
+
+      return {
+        // ⚠️ 参数顺序：(栈指针, ptr) —— 与直觉相反
+        url: readResultString((stack, ptr) => g.exports.requestresult_url!(stack, ptr)),
+        headers,
+        body: readResultString((stack, ptr) => g.exports.requestresult_body!(stack, ptr)),
+      }
+    } finally {
+      g.exports.__wbg_requestresult_free!(result)
     }
+  }
+
+  /**
+   * 释放当前实例持有的 WASM `QoderContext`（幂等）。
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    if (this.context) this.g.exports.__wbg_qodercontext_free!(this.context)
   }
 }
 
