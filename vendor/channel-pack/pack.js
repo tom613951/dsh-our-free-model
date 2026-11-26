@@ -29956,7 +29956,7 @@ var AccountPool = class {
    * 「池认为最优的一个」，无法枚举候选自己去重。
    */
   async getAvailableAccount(provider, modelId, excludeAccountIds) {
-    const candidates = this.readAccounts().filter((a) => a.provider === provider && a.enabled).filter((a) => excludeAccountIds === void 0 || !excludeAccountIds.has(a.id)).filter((a) => {
+    const candidates = this.readAccounts().filter((a) => a.provider === provider && a.enabled).filter((a) => (a.suspendedUntil ?? 0) <= Date.now()).filter((a) => excludeAccountIds === void 0 || !excludeAccountIds.has(a.id)).filter((a) => {
       if (modelId.length === 0) return true;
       if (!a.modelRateLimits) return true;
       const resetAt = a.modelRateLimits[modelId];
@@ -30018,7 +30018,7 @@ var AccountPool = class {
    * ⇒ 这里取「更长者」。真值被丢掉的风险不用担心：所有调用方写入的都是**未来**
    * 时刻，而过期的标记由 {@link sweepExpiredRateLimits} 清理。
    */
-  async updateModelRateLimit(accountId, modelId, resetAtMs) {
+  async updateModelRateLimit(accountId, modelId, resetAtMs, accountSuspended = false) {
     const accounts = this.readAccounts();
     const idx = accounts.findIndex((a) => a.id === accountId);
     if (idx === -1) {
@@ -30034,7 +30034,7 @@ var AccountPool = class {
       return;
     }
     const current = accounts[idx].modelRateLimits?.[modelId];
-    if (Number.isFinite(current) && current >= resetAtMs) {
+    if (Number.isFinite(current) && current >= resetAtMs && (!accountSuspended || (accounts[idx].suspendedUntil ?? 0) >= resetAtMs)) {
       this.ctx.logger?.info?.(
         `[channel-pack] updateModelRateLimit: \u8D26\u53F7 ${accountId} \u6A21\u578B ${modelId} \u5DF2\u6709\u66F4\u957F\u7684\u9650\u6D41\u6807\u8BB0 (${new Date(current).toISOString()} \u2265 ${new Date(resetAtMs).toISOString()})\uFF0C\u672C\u6B21\u4E0D\u8986\u76D6`
       );
@@ -30042,7 +30042,8 @@ var AccountPool = class {
     }
     const next = [...accounts];
     const entry = { ...next[idx] };
-    entry.modelRateLimits = { ...entry.modelRateLimits, [modelId]: resetAtMs };
+    entry.modelRateLimits = { ...entry.modelRateLimits, [modelId]: Math.max(Number.isFinite(current) ? current : 0, resetAtMs) };
+    if (accountSuspended) entry.suspendedUntil = Math.max(entry.suspendedUntil ?? 0, resetAtMs);
     next[idx] = entry;
     await this.writeAccounts(next);
     this.ctx.logger?.info?.(
@@ -32157,6 +32158,10 @@ var LobsteraiAdapter = class extends LlmAdapter {
         console.warn("[lobsterai] \u8D26\u53F7\u5339\u914D\u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u672C\u6B21\u8BF7\u6C42\uFF09:", error);
       }
     }
+    const suspendedUntil = this.options.accountPool?.findAccount?.(currentAccountId)?.suspendedUntil;
+    if (suspendedUntil && suspendedUntil > Date.now()) {
+      throw new LlmError4(`lobsterai: \u8D26\u53F7\u6682\u65F6\u505C\u7528\uFF0C\u9884\u8BA1 ${new Date(suspendedUntil).toLocaleString("zh-CN")} \u6062\u590D`, "PERMISSION", { status: 403 });
+    }
     const messages = serializeMessages(options.messages, imageUrls);
     if (options.system !== void 0 && options.system.length > 0) {
       messages.unshift({ role: "system", content: options.system });
@@ -32227,7 +32232,8 @@ var LobsteraiAdapter = class extends LlmAdapter {
           parsed?.modelId ?? options.model,
           // 三条取值都失败时的兜底：1 小时后，与 `parseRateLimitError` 自己的
           // JSON fallback 同一口径，也与「标记只是快照、可主动重测」的语义一致。
-          suspendedResetAtMs ?? parsed?.resetTimeMs ?? Date.now() + LOBSTERAI_RATE_LIMIT_FALLBACK_MS
+          suspendedResetAtMs ?? parsed?.resetTimeMs ?? Date.now() + LOBSTERAI_RATE_LIMIT_FALLBACK_MS,
+          lastKind === "suspended"
         );
       }
       if (!this.options.accountPool || !shouldRotateLobsteraiAccount(lastKind)) {

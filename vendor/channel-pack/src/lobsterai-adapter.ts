@@ -987,6 +987,11 @@ export class LobsteraiAdapter extends LlmAdapter {
       }
     }
 
+    const suspendedUntil = this.options.accountPool?.findAccount?.(currentAccountId)?.suspendedUntil
+    if (suspendedUntil && suspendedUntil > Date.now()) {
+      throw new LlmError(`lobsterai: 账号暂时停用，预计 ${new Date(suspendedUntil).toLocaleString('zh-CN')} 恢复`, 'PERMISSION', { status: 403 })
+    }
+
     // 3. 构造请求体
     const messages = serializeMessages(options.messages, imageUrls)
     if (options.system !== undefined && options.system.length > 0) {
@@ -1126,6 +1131,7 @@ export class LobsteraiAdapter extends LlmAdapter {
           // 三条取值都失败时的兜底：1 小时后，与 `parseRateLimitError` 自己的
           // JSON fallback 同一口径，也与「标记只是快照、可主动重测」的语义一致。
           suspendedResetAtMs ?? parsed?.resetTimeMs ?? Date.now() + LOBSTERAI_RATE_LIMIT_FALLBACK_MS,
+          lastKind === 'suspended',
         )
       }
 

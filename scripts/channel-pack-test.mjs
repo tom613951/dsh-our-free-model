@@ -376,6 +376,36 @@ async function verifyLobsteraiSuspendedAccount() {
   assert.equal(errors.classifyLobsteraiError(429, ''), 'soft-rate')
   assert.equal(errors.classifyLobsteraiError(200, '免费额度已用完，请升级套餐'), 'hard-credit')
   assert.equal(errors.shouldRotateLobsteraiAccount('hard-credit'), true, '额度耗尽仍应换号')
+  const { LobsteraiAdapter } = await import('../vendor/channel-pack/src/lobsterai-adapter.ts')
+  let requests = 0
+  const limits = []
+  const account = { id: 'first' }
+  const adapter = new LobsteraiAdapter({
+    resolveCredential: async () => ({ access_token: 'fixture' }),
+    resolveClientVersion: async () => '1.0',
+    refresh: () => assert.fail('unexpected refresh'),
+    accountPool: {
+      findAccountIdByCredential: async () => account.id,
+      findAccount: () => account,
+      getAvailableAccount: () => assert.fail('unexpected rotation to second account'),
+      updateModelRateLimit: async (...args) => {
+        limits.push(args)
+        if (args[3]) account.suspendedUntil = args[2]
+      },
+    },
+    fetchImpl: async () => {
+      requests++
+      const message = notice.replace('2026-11-18', '2099-11-18')
+      return new Response('data: ' + JSON.stringify({ error: { message } }) + '\n\n')
+    },
+  })
+  for (const model of ['deepseek-flash', 'another-model']) {
+    await assert.rejects(async () => {
+      for await (const chunk of adapter.stream({ model, messages: [] })) assert.fail(JSON.stringify(chunk))
+    }, { code: 'PERMISSION' })
+  }
+  assert.equal(requests, 1)
+  assert.deepEqual(limits, [['first', 'deepseek-flash', Date.parse('2099-11-18T11:08:21+08:00'), true]])
   console.log('ok  lobsterai #850: 200+流内停用判 suspended、不换号、恢复时刻可解析，普通文案不误判')
 }
 
